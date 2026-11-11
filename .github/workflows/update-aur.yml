@@ -38,10 +38,11 @@ jobs:
           runuser -u builder -- git config --global user.email "becomeillusory@gmail.com"
 
       - name: 检查并更新所有包
-        run: runuser -u builder -- bash update-all.sh
+        run: runuser -u builder -- env GIT_SSH_COMMAND='ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /home/builder/.ssh/aur_key' bash update-all.sh > update.log 2>&1 || { tail -50 update.log; exit 1; }
         env:
           GH_TOKEN: ${{ github.token }}
 
       - name: 汇总
         run: |
-          echo "### 本次自动更新完成" >> "$GITHUB_STEP_SUMMARY"
+          cat update.log
+          echo "### 本次自动更新已完成" >> "$GITHUB_STEP_SUMMARY"
