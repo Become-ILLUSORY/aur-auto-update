@@ -17,7 +17,7 @@ jobs:
       - name: 安装构建工具并建普通用户（makepkg 拒绝 root）
         run: |
           pacman -Sy --noconfirm
-          pacman -S --noconfirm --needed base-devel git curl jq python github-cli sudo
+          pacman -S --noconfirm --needed base-devel git curl jq python github-cli sudo openssh
           useradd -m builder
           chown -R builder:builder "${GITHUB_WORKSPACE}"
 
