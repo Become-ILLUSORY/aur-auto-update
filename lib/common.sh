@@ -128,7 +128,7 @@ shasum_of_url() {
 
 # ---------- AUR 提交 ----------
 
-# 把工作目录里的改动提交并推送到 AUR（需已 remote add aur）。
+# 把工作目录里的改动提交并推送到 AUR（需已 remote add aur，走 SSH）。
 # 跳过空提交。commit message 末尾不加任何外部署名。
 aur_push_if_changed() {
   local msg="$1"
@@ -139,7 +139,7 @@ aur_push_if_changed() {
   git add -A
   git commit -m "$msg"
   if [[ "${AUR_PUSH:-1}" == "1" ]]; then
-    git push origin master
+    git push aur master
   else
     echo "  (dry-run) 跳过 push"
   fi

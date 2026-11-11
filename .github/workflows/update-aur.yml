@@ -14,30 +14,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装构建工具
+      - name: 安装构建工具并建普通用户（makepkg 拒绝 root）
         run: |
           pacman -Sy --noconfirm
-          pacman -S --noconfirm --needed base-devel git curl jq python github-cli
-          git config --global user.name "Become-ILLUSORY"
-          git config --global user.email "becomeillusory@gmail.com"
-          echo "makepkg: $(command -v makepkg)"
+          pacman -S --noconfirm --needed base-devel git curl jq python github-cli sudo
+          useradd -m builder
+          chown -R builder:builder "${GITHUB_WORKSPACE}"
 
-      - name: 配置 AUR SSH
+      - name: 准备 builder 环境（git 署名 + AUR SSH）
         run: |
-          mkdir -p ~/.ssh
+          mkdir -p /home/builder/.ssh
           umask 077
-          printf '%s\n' "${{ secrets.AUR_SSH_KEY }}" > ~/.ssh/aur_key
-          chmod 600 ~/.ssh/aur_key
-          cat > ~/.ssh/config <<'EOF'
+          printf '%s\n' "${{ secrets.AUR_SSH_KEY }}" > /home/builder/.ssh/aur_key
+          chown -R builder:builder /home/builder/.ssh
+          cat > /home/builder/.ssh/config <<'EOF'
           Host aur.archlinux.org
             User aur
             IdentityFile ~/.ssh/aur_key
             IdentitiesOnly yes
             StrictHostKeyChecking no
           EOF
+          runuser -u builder -- git config --global user.name "Become-ILLUSORY"
+          runuser -u builder -- git config --global user.email "becomeillusory@gmail.com"
 
       - name: 检查并更新所有包
-        run: bash update-all.sh
+        run: runuser -u builder -- bash update-all.sh
         env:
           GH_TOKEN: ${{ github.token }}
 
