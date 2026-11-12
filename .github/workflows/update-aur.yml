@@ -44,8 +44,24 @@ jobs:
 
       - name: 汇总
         run: |
+          # grep/sed 对 UTF-8 中文的 [^ ] 匹配依赖 locale，显式固定，避免解析挂掉
+          export LC_ALL=C.UTF-8
           cat update.log
-          echo "### 本次自动更新已完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "## 本次自动更新" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "运行时间：$(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          # update-all.sh 末尾输出的 "===== 汇总 =====" 段：逐行 | 分隔：包名|动作|版本|备注
+          if grep -q '^===== 汇总 =====' update.log; then
+            echo "| 包 | 动作 | 版本 | 备注 |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+            sed -n '/^===== 汇总 =====$/,/^全部完成/p' update.log \
+              | grep -E '^  [^ ]' \
+              | sed -E 's/^  ([^ ]+) +([^ ]+) +([^ ]+) +(.*)$/| \1 | \2 | \3 | \4 |/' \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_update-all.sh 未输出汇总段（脚本异常终止？）_，详情见下方完整日志" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   build-oplus:
     # oplus-connect：源码构建包（无 tag/release），每次上游 main 有新 commit 就
@@ -185,3 +201,11 @@ jobs:
 
             安装: sudo pacman -U $pkg" \
             "$pkg"
+
+          # 步骤摘要：发布成功后给出可复制的安装命令
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## oplus-connect 构建发布" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 上游 commit：\`${commit:0:12}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 包文件：\`$pkg\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 安装：\`sudo pacman -U <release-asset>\`" >> "$GITHUB_STEP_SUMMARY"

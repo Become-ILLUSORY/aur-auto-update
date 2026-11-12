@@ -12,6 +12,11 @@ trap 'rm -rf "$WORK"' EXIT
 
 source "$ROOT/lib/common.sh"
 
+# 逐包摘要收集：SUMMARY=("包名|动作|版本|备注")，最后渲染成 markdown 表。
+# 动作 ∈ 更新推送 / 无更新 / 首次建仓 / 有改动未推送 / 失败 / 跳过
+declare -a SUMMARY=()
+summary_add() { SUMMARY+=("$1|$2|$3|$4"); }
+
 # AUR 仓库是否已存在：git ls-remote 对不存在的包也返回空仓库(exit 0)，
 # 不可靠；用 AUR RPC v5 info 判断（resultcount>=1 = 已注册存在）。
 aur_exist() {
@@ -68,24 +73,57 @@ run_one() {
     aur_clone "$pkg" "$wd"
   else
     echo "  [$pkg] AUR 仓库不存在，首次建仓"
-    init_pkg_repo "$pkg" "$wd"
+    if ! init_pkg_repo "$pkg" "$wd"; then
+      summary_add "$pkg" "失败" "-" "bootstrap 文件中缺 PKGBUILD/"
+      return 0
+    fi
   fi
 
-  # 包脚本约定：source lib/common.sh 后在当前目录(PKGBUILD 所在)定义并执行 run()
-  if ! (
-    cd "$wd"
-    export ROOT PKG_DIR="$ROOT/packages"
-    source "$conf"
-    run
-  ); then
-    echo "  !! [$pkg] run() 失败，跳过"
+  # 跑各包脚本 run()：捕获退出码，输出原样透传
+  local run_rc=0 run_out
+  run_out="$(cd "$wd" && export ROOT PKG_DIR="$ROOT/packages" && source "$conf" && run)" || run_rc=$?
+  [[ -n "$run_out" ]] && echo "$run_out"
+
+  # 版本信息从 .SRCINFO 读（更新前后同一读法）
+  local ver
+  ver="$(cd "$wd" && srcinfo_val pkgver 2>/dev/null || echo '-')"
+
+  if (( run_rc != 0 )); then
+    echo "  !! [$pkg] run() 失败(rc=$run_rc)，跳过"
+    summary_add "$pkg" "失败" "$ver" "run() 退出码 $run_rc（见上方日志）"
     return 0
   fi
 
+  # craft 等包的 gh-proxy 前缀补丁：无条件执行（幂等），
+  # 首次跟进时即使 run() 无新版本也要把它提交推上去。
   pushd "$wd" >/dev/null
     ensure_ghproxy
-    aur_push_if_changed "chore(${pkg}): auto-update"
   popd >/dev/null
+
+  local state="$(git -C "$wd" status --porcelain)"
+  local action note=""
+  if [[ -z "$state" ]]; then
+    action="无更新"
+    note="上游无新版本，AUR 已是最新"
+  elif [[ "${AUR_PUSH:-1}" == "1" ]]; then
+    local before after
+    before="$(git -C "$wd" rev-parse HEAD)"
+    pushd "$wd" >/dev/null
+      aur_push_if_changed "chore(${pkg}): auto-update"
+    popd >/dev/null
+    after="$(git -C "$wd" rev-parse HEAD)"
+    if [[ "$before" != "$after" ]]; then
+      action="更新推送"
+      note="$(git -C "$wd" show --stat --format='%s' "${after:0:7}" | tail -n +2 | tr '\n' ' ' | awk '{$1=$1};1')"
+    else
+      action="未推送"
+      note="有改动但 HEAD 未前进（dry-run？或 push 失败，见日志）"
+    fi
+  else
+    action="DRY-RUN"
+    note="有改动，未 push（AUR_PUSH=0）"
+  fi
+  summary_add "$pkg" "$action" "$ver" "$note"
 }
 
 # 支持指定的包脚本，否则跑全部
@@ -100,4 +138,10 @@ for conf in "${targets[@]}"; do
   run_one "$conf"
 done
 
+echo ""
+echo "===== 汇总 ====="
+for line in "${SUMMARY[@]}"; do
+  IFS='|' read -r pkg action ver note <<< "$line"
+  printf '  %-28s %s   %-10s %s\n' "$pkg" "$action" "$ver" "$note"
+done
 echo "全部完成。"
