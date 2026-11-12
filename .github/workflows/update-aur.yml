@@ -167,6 +167,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # checkout 目录被 chown 给了 builder，root 跑 gh 内部 git 会触发
+          # safe.directory 检查（dubious ownership）——容器一次性，全局放行
+          git config --global --add safe.directory '*'
           commit="${{ steps.upstream.outputs.sha }}"
           pkg=$(ls *.pkg.tar.zst | head -1)
           [[ -n "$pkg" ]] || { echo "!! 未找到 pkg.tar.zst"; exit 1; }
