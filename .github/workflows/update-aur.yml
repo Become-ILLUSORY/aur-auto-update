@@ -75,12 +75,16 @@ jobs:
 
   build-oplus:
     # oplus-connect：源码构建包（无 tag/release），每次上游 main 有新 commit 就
-    # 在 CI 里用 cachyos-v3（x86-64-v3 优化包）重编译出 .pkg.tar.zst 并发布到
-    # 本仓库 GitHub Release（tag: oplus-connect-latest）。跳过判断用 release body 里
-    # 的 BUILD_SHA 对比。以后源码构建类包一律走本 job 的 cachyos-v3 模式。
+    # 在 CI 里用官方 archlinux 容器重编译出 .pkg.tar.zst 并发布到本仓库
+    # GitHub Release（tag: oplus-connect-latest）。跳过判断用 release body 里的
+    # BUILD_SHA 对比。
+    # 镜像必须用官方 archlinux:latest：cachyos-v3 的 rust 默认 target-cpu=native
+    # （runner 是带 AVX-512 的 Xeon），会把 zmm 指令编进二进制，无 AVX-512 的
+    # AMD CPU（如 6800H）直接 SIGILL 打不开。官方 rust 默认 x86-64 baseline
+    # 天然无 AVX-512。
     runs-on: ubuntu-latest
     container:
-      image: cachyos/cachyos-v3:latest
+      image: archlinux:latest
     permissions:
       contents: write
     defaults:
@@ -160,25 +164,11 @@ jobs:
         if: steps.last.outputs.skip != 'true'
         run: |
           commit="${{ steps.upstream.outputs.sha }}"
-          # 必须锁定 target-cpu=x86-64-v3 ：cachyos-v3 容器会给 cargo 预置带 AVX-512 的
-          # CARGO_ENCODED_RUSTFLAGS（upstream `_cargo_build_env` 优先读它，RUSTFLAGS 被忽略），
-          # 在 GitHub runner(Xeon, 支持 AVX-512)上编出 vmovups %zmm，无 AVX-512 的 AMD CPU
-          # 直接 SIGILL (ILL_ILLOPN) 打不开。两个变量都覆盖，并清掉恢复的旧 avx512 target
-          # 强制全量重编（只覆盖 RUSTFLAGS 时 cargo 会 0.36s Fresh 复用旧产物）。
+          # archlinux 官方 rust 默认 x86-64 baseline，天然无 AVX-512。
+          # 清掉 target 缓存强制全量重编，避免复用 cachyos 旧 avx512 产物
+          # （fingerprint 无法覆盖 rustc 之间编译产物差异）。
           rm -rf src/target
-          # 目标 = 最保守 baseline(x86-64 + SSE2)：自用包,6800H 跑互联类应用
-          # 与 AVX2 无体感差别,但默认编译天然不会产出 AVX-512,防止 runner 上
-          # 带 avx512 的 Xeon 把 checksum 快路径(如 crc, 长输入强制 zmm 分支)
-          # 编进产物导致无 avx512 的 AMD CPU 直接 SIGILL。
-          #
-          # 注意两个 env 都要显式设为【空】：
-          #  - CARGO_ENCODED_RUSTFLAGS：cachyos-v3 容器预置了带 avx512 的默认值,
-          #    upstream _cargo_build_env 优先读它;清空后走 RUSTFLAGS 分支。
-          #  - RUSTFLAGS：同样清空,之后 flags 只剩 _cargo_build_env 附加的
-          #    --remap-path-prefix,行为=纯默认 baseline 编译。
-          #  (写成 -Ctarget-cpu=… 连写会作用 target-cpu 但没必要且多一处维护)
           runuser -u builder -- env HOME=/home/builder CARGO_INCREMENTAL=0 SOURCE_DATE_EPOCH=1 \
-            CARGO_ENCODED_RUSTFLAGS= RUSTFLAGS= \
             OPLUS_CONNECT_SOURCE_URL="file://$PWD#commit=$commit" \
             makepkg --nocheck --noconfirm --nosign
           sha256sum *.pkg.tar.zst
@@ -223,7 +213,7 @@ jobs:
           commit="${{ steps.upstream.outputs.sha }}"
           pkg=$(ls *.pkg.tar.zst | head -1)
           [[ -n "$pkg" ]] || { echo "!! 未找到 pkg.tar.zst"; exit 1; }
-          # cachyos 镜像里的 gh 版本较旧，没有 --clobber：改用 先删后建（幂等）
+          # 同 tag 重复发布：先删后建（幂等）
           if gh release view oplus-connect-latest -R "$repo" >/dev/null 2>&1; then
             gh release delete oplus-connect-latest -R "$repo" --yes --cleanup-tag
           fi
