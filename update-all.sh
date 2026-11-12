@@ -12,16 +12,50 @@ trap 'rm -rf "$WORK"' EXIT
 
 source "$ROOT/lib/common.sh"
 
+# AUR 仓库是否已存在：git ls-remote 对不存在的包也返回空仓库(exit 0)，
+# 不可靠；用 AUR RPC v5 info 判断（resultcount>=1 = 已注册存在）。
+aur_exist() {
+  local r
+  r="$(curl -fsSL --retry 2 "https://aur.archlinux.org/rpc/v5/info?arg[]=$1" 2>/dev/null \
+       | jq -r '.resultcount // 0' 2>/dev/null || echo 0)"
+  (( r >= 1 ))
+}
+
+# AUR 首次建仓：bootstrap/<pkg>/ 存有初版 PKGBUILD+.SRCINFO，
+# 仓库不存在时用它们创建并 push，避免本机直连 AUR SSH。
+init_pkg_repo() {
+  local pkg="$1" dir="$2"
+  [[ -f "$ROOT/bootstrap/$pkg/PKGBUILD" ]] || { echo "  !! bootstrap/$pkg 缺失，跳过建仓"; return 1; }
+  mkdir -p "$dir"
+  cp "$ROOT/bootstrap/$pkg/PKGBUILD" "$ROOT/bootstrap/$pkg/.SRCINFO" "$dir/"
+  git -C "$dir" init -b master -q
+  git -C "$dir" config user.name "Become-ILLUSORY"
+  git -C "$dir" config user.email "becomeillusory@gmail.com"
+  git -C "$dir" add -A
+  git -C "$dir" commit -qm "chore(${pkg}): initial import"
+  git -C "$dir" remote add aur "ssh://aur@aur.archlinux.org/${pkg}.git"
+  if [[ "${AUR_PUSH:-1}" == "1" ]]; then
+    git -C "$dir" push aur master
+  else
+    echo "  (dry-run) 跳过首次 push"
+  fi
+}
+
 # ---- 单个包的一次性处理 ----
 run_one() {
-  local conf="$1"
+  local conf; conf="$(realpath "$1")"
   local pkg
   pkg="$(basename "$conf" .sh)"
   pkg="${pkg#pkg-}"
 
   echo "===== [$pkg] 开始 ====="
   local wd="$WORK/$pkg"
-  aur_clone "$pkg" "$wd"
+  if aur_exist "$pkg"; then
+    aur_clone "$pkg" "$wd"
+  else
+    echo "  [$pkg] AUR 仓库不存在，首次建仓"
+    init_pkg_repo "$pkg" "$wd"
+  fi
 
   # 包脚本约定：source lib/common.sh 后在当前目录(PKGBUILD 所在)定义并执行 run()
   if ! (

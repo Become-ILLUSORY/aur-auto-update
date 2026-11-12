@@ -12,12 +12,15 @@
 | `kcxy-wifi-bin` | Become-ILLUSORY/kcxy-wifi | release | 三架构 checksum |
 | `linux-wallpaperengine-v3-bin` | Become-ILLUSORY/linux-wallpaperengine | release | x86-64-v3 自构建 |
 | `mactahoe-icon-theme` | vinceliuice/MacTahoe-icon-theme | tag | 日期式 tag（`-`→`.`） |
+| `wordcraft-private-bin` 等 14 个 craft 套件 | storytold/<app> | release | 官方 `.pkg.tar.zst` 重打包，checksum 锁官方 SHA256SUMS.txt；首次由 bootstrap/ 自动建仓 |
+
+craft 系列（14 个）：`wordcraft` `deckcraft` `photocraft` `vectorcraft` `filmcraft` `lightcraft` `pdfcraft` `effectcraft` `designcraft` `figcraft` `soundcraft` `cadcraft` `gridcraft` `texturecraft`，均为 `*-private-bin` 自用包，脚本由 `/tmp` 生成的统一模板派生。
 
 ## 工作方式
 
 - `lib/common.sh`：共享函数（GitHub API 查版本、比较版本、改 PKGBUILD、算 checksum、push AUR）
 - `packages/<pkg>.sh`：每个包一个更新逻辑（`run()` 函数）
-- `update-all.sh`：遍历每个包——clone AUR 仓库 → 执行包的 `run()` → 有改动就 commit+push
+- `update-all.sh`：遍历每个包——先探测 AUR 仓库是否存在（RPC 探测，git ls-remote 不可靠），不存在则用 `bootstrap/<pkg>/` 的初版 PKGBUILD+.SRCINFO 首次建仓推送，存在则 clone AUR 仓库 → 执行包的 `run()` → 有改动就 commit+push
 
 每个包的 `run()` 独立、幂等：当前已是最新时就跳过。
 
