@@ -9,7 +9,6 @@
 | `wowtype-core` | Gloridust/WowType | release | checksum 取上游 SHA256SUMS |
 | `flclash-myflavor-bin` | myflavor/FlClash | release | 架构特定 checksum |
 | `honk-bin` | daeuniverse/honk | tag（无 release） | pkg 名与 tag 译码（`-`→去掉），多架构，jsDelivr 取 example.dae |
-| `kcxy-wifi-bin` | Become-ILLUSORY/kcxy-wifi | release | 三架构 checksum |
 | `linux-wallpaperengine-v3-bin` | Become-ILLUSORY/linux-wallpaperengine | release | x86-64-v3 自构建 |
 | `mactahoe-icon-theme` | vinceliuice/MacTahoe-icon-theme | tag | 日期式 tag（`-`→`.`） |
 | `wordcraft-private-bin` 等 14 个 craft 套件 | storytold/<app> | release | 官方 `.pkg.tar.zst` 重打包，checksum 锁官方 SHA256SUMS.txt；首次由 bootstrap/ 自动建仓 |
