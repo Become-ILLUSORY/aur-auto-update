@@ -95,7 +95,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          last="$(gh release view oplus-connect-latest --json body --jq '.body' 2>/dev/null | sed -n 's/^BUILD_SHA: \([0-9a-f]\{40\}\)$/\1/p' || true)"
+          last="$(gh release view oplus-connect-latest -R "$GITHUB_REPOSITORY" --json body --jq '.body' 2>/dev/null | sed -n 's/^BUILD_SHA: \([0-9a-f]\{40\}\)$/\1/p' || true)"
           echo "last=$last" >> "$GITHUB_OUTPUT"
           if [[ -n "$last" && "$last" == "${{ steps.upstream.outputs.sha }}" ]]; then
             echo "上游无新 commit，跳过构建"
@@ -186,14 +186,17 @@ jobs:
           # checkout 目录被 chown 给了 builder，root 跑 gh 内部 git 会触发
           # safe.directory 检查（dubious ownership）——容器一次性，全局放行
           git config --global --add safe.directory '*'
+          # 当前 git remote 是上游 YuKongA/oplus-connect，gh 默认发到那里会 403；
+          # 必须显式 -R 指回本仓库（GITHUB_REPOSITORY 是 GitHub 注入的固定变量）
+          repo="$GITHUB_REPOSITORY"
           commit="${{ steps.upstream.outputs.sha }}"
           pkg=$(ls *.pkg.tar.zst | head -1)
           [[ -n "$pkg" ]] || { echo "!! 未找到 pkg.tar.zst"; exit 1; }
           # cachyos 镜像里的 gh 版本较旧，没有 --clobber：改用 先删后建（幂等）
-          if gh release view oplus-connect-latest >/dev/null 2>&1; then
-            gh release delete oplus-connect-latest --yes --cleanup-tag
+          if gh release view oplus-connect-latest -R "$repo" >/dev/null 2>&1; then
+            gh release delete oplus-connect-latest -R "$repo" --yes --cleanup-tag
           fi
-          gh release create oplus-connect-latest \
+          gh release create oplus-connect-latest -R "$repo" \
             --latest \
             --title "oplus-connect" \
             --notes "BUILD_SHA: $commit
