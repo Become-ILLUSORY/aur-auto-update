@@ -41,6 +41,20 @@ init_pkg_repo() {
   fi
 }
 
+# craft 包下载加速：给源 PKGBUILD 里的 storytold release URL 加 gh-proxy.com 前缀（幂等）。
+# 无别名也行——srcdir 文件名=URL 末段，与 package() 引用一致。
+ensure_ghproxy() {
+  if grep -q 'gh-proxy.com' PKGBUILD; then
+    echo "  -> source 已含 gh-proxy.com"
+    return 0
+  fi
+  if grep -q 'https://github.com/storytold/' PKGBUILD; then
+    sed -i 's|https://github.com/storytold/|https://gh-proxy.com/https://github.com/storytold/|' PKGBUILD
+    gen_srcinfo
+    echo "  -- source 已加 gh-proxy.com 前缀"
+  fi
+}
+
 # ---- 单个包的一次性处理 ----
 run_one() {
   local conf; conf="$(realpath "$1")"
@@ -69,6 +83,7 @@ run_one() {
   fi
 
   pushd "$wd" >/dev/null
+    ensure_ghproxy
     aur_push_if_changed "chore(${pkg}): auto-update"
   popd >/dev/null
 }
