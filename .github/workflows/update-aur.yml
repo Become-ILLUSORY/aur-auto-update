@@ -129,7 +129,7 @@ jobs:
             --clobber --latest \
             --title "oplus-connect" \
             --notes "BUILD_SHA: $commit
-由 aur-auto-update CI 自动构建（YuKongA/oplus-connect@${commit:0:12}）
+            由 aur-auto-update CI 自动构建（YuKongA/oplus-connect@${commit:0:12}）
 
-安装: sudo pacman -U $pkg" \
+            安装: sudo pacman -U $pkg" \
             "$pkg"
