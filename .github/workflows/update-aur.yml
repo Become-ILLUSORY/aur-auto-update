@@ -133,8 +133,12 @@ jobs:
           commit="${{ steps.upstream.outputs.sha }}"
           pkg=$(ls *.pkg.tar.zst | head -1)
           [[ -n "$pkg" ]] || { echo "!! 未找到 pkg.tar.zst"; exit 1; }
+          # cachyos 镜像里的 gh 版本较旧，没有 --clobber：改用 先删后建（幂等）
+          if gh release view oplus-connect-latest >/dev/null 2>&1; then
+            gh release delete oplus-connect-latest --yes --cleanup-tag
+          fi
           gh release create oplus-connect-latest \
-            --clobber --latest \
+            --latest \
             --title "oplus-connect" \
             --notes "BUILD_SHA: $commit
             由 aur-auto-update CI 自动构建（YuKongA/oplus-connect@${commit:0:12}）
