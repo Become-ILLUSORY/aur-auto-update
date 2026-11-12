@@ -155,11 +155,14 @@ jobs:
         if: steps.last.outputs.skip != 'true'
         run: |
           commit="${{ steps.upstream.outputs.sha }}"
-          # 必须锁定 target-cpu=x86-64-v3：cachyos-v3 容器默认按 runner CPU 编译
-          # （GitHub Xeon 带 AVX-512），产物在无 AVX-512 的 AMD CPU 上直接 SIGILL
-          # （ILL_ILLOPN, vmovups %zmm）。v3 = avx2/fma 已覆盖本机 6800H。
+          # 必须锁定 target-cpu=x86-64-v3 ：cachyos-v3 容器会给 cargo 预置带 AVX-512 的
+          # CARGO_ENCODED_RUSTFLAGS（upstream `_cargo_build_env` 优先读它，RUSTFLAGS 被忽略），
+          # 在 GitHub runner(Xeon, 支持 AVX-512)上编出 vmovups %zmm，无 AVX-512 的 AMD CPU
+          # 直接 SIGILL (ILL_ILLOPN) 打不开。两个变量都覆盖，并清掉恢复的旧 avx512 target
+          # 强制全量重编（只覆盖 RUSTFLAGS 时 cargo 会 0.36s Fresh 复用旧产物）。
+          rm -rf src/target
           runuser -u builder -- env HOME=/home/builder CARGO_INCREMENTAL=0 SOURCE_DATE_EPOCH=1 \
-            RUSTFLAGS="-C target-cpu=x86-64-v3" \
+            CARGO_ENCODED_RUSTFLAGS=$'-C target-cpu=x86-64-v3' RUSTFLAGS="-C target-cpu=x86-64-v3" \
             OPLUS_CONNECT_SOURCE_URL="file://$PWD#commit=$commit" \
             makepkg --nocheck --noconfirm --nosign
           sha256sum *.pkg.tar.zst
