@@ -108,6 +108,25 @@ jobs:
           useradd -m builder
           chown -R builder:builder "${GITHUB_WORKSPACE}"
 
+      - name: 恢复 cargo 缓存（加速后续增量编译）
+        id: cargocache
+        if: steps.last.outputs.skip != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /home/builder/.cargo/registry
+            /home/builder/.cargo/git
+            src/target
+          key: ${{ runner.os }}-cargo-target-${{ steps.upstream.outputs.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: 修复缓存属主（restore 是 root，builder 要写）
+        if: steps.last.outputs.skip != 'true'
+        run: |
+          install -d -o builder -g builder /home/builder/.cargo 2>/dev/null || true
+          chown -R builder:builder /home/builder/.cargo src 2>/dev/null || true
+
       - name: 构建 .pkg.tar.zst
         if: steps.last.outputs.skip != 'true'
         run: |
@@ -116,6 +135,24 @@ jobs:
             OPLUS_CONNECT_SOURCE_URL="file://$PWD#commit=$commit" \
             makepkg --nocheck --noconfirm --nosign
           sha256sum *.pkg.tar.zst
+
+      - name: 上传构建产物（发布失败也留包）
+        if: steps.last.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: oplus-connect-${{ steps.upstream.outputs.sha }}
+          path: "*.pkg.tar.zst"
+          if-no-files-found: error
+
+      - name: 保存 cargo 缓存
+        if: steps.last.outputs.skip != 'true' && steps.cargocache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /home/builder/.cargo/registry
+            /home/builder/.cargo/git
+            src/target
+          key: ${{ runner.os }}-cargo-target-${{ steps.upstream.outputs.sha }}
 
       - name: 安装测试（装不上则失败，不发布）
         if: steps.last.outputs.skip != 'true'
