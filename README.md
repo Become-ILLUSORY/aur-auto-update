@@ -13,6 +13,7 @@
 | `linux-wallpaperengine-v3-bin` | Become-ILLUSORY/linux-wallpaperengine | release | x86-64-v3 自构建 |
 | `mactahoe-icon-theme` | vinceliuice/MacTahoe-icon-theme | tag | 日期式 tag（`-`→`.`） |
 | `wordcraft-private-bin` 等 14 个 craft 套件 | storytold/<app> | release | 官方 `.pkg.tar.zst` 重打包，checksum 锁官方 SHA256SUMS.txt；首次由 bootstrap/ 自动建仓 |
+| `uu-remote-linux-private-bin` | VallierDev/uu-remote-linux | release | 非官方 UU 远程被控端，source 走 gh-proxy 加速，镜像官方 .deb 布局，双架构 checksum 锁伴随 .sha256 |
 
 craft 系列（14 个）：`wordcraft` `deckcraft` `photocraft` `vectorcraft` `filmcraft` `lightcraft` `pdfcraft` `effectcraft` `designcraft` `figcraft` `soundcraft` `cadcraft` `gridcraft` `texturecraft`，均为 `*-private-bin` 自用包，脚本由 `/tmp` 生成的统一模板派生。
 

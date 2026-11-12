@@ -46,3 +46,89 @@ jobs:
         run: |
           cat update.log
           echo "### 本次自动更新已完成" >> "$GITHUB_STEP_SUMMARY"
+
+  build-oplus:
+    # oplus-connect：源码构建包（无 tag/release），每次上游 main 有新 commit 就
+    # 在 CI 里重编译出 .pkg.tar.zst 并发布到本仓库 GitHub Release（tag: oplus-connect-latest）。
+    # 跳过判断依赖 release body 里记录的 BUILD_SHA。
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: 查询上游最新 commit
+        id: upstream
+        run: |
+          sha="$(git ls-remote https://github.com/YuKongA/oplus-connect.git refs/heads/main | awk '{print $1}')"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "!! 无法获取上游 sha: $sha"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "上游 main = ${sha:0:12}"
+
+      - name: 安装 gh（对比步骤也要用，先装轻量工具）
+        run: |
+          pacman -Sy --noconfirm
+          pacman -S --noconfirm --needed github-cli git sudo ca-certificates
+
+      - name: 对比上次已构建版本
+        id: last
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last="$(gh release view oplus-connect-latest --json body --jq '.body' 2>/dev/null | sed -n 's/^BUILD_SHA: \([0-9a-f]\{40\}\)$/\1/p' || true)"
+          echo "last=$last" >> "$GITHUB_OUTPUT"
+          if [[ -n "$last" && "$last" == "${{ steps.upstream.outputs.sha }}" ]]; then
+            echo "上游无新 commit，跳过构建"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 检出上游源码（固定 commit）
+        if: steps.last.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: YuKongA/oplus-connect
+          ref: ${{ steps.upstream.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 安装构建依赖并建普通用户（makepkg 拒绝 root）
+        if: steps.last.outputs.skip != 'true'
+        run: |
+          pacman -Sy --noconfirm
+          pacman -S --noconfirm --needed git sudo base-devel github-cli rust zstd
+          mapfile -t deps < <(bash -c 'source PKGBUILD && printf "%s\n" "${depends[@]}" "${makedepends[@]}"' | grep -xE '^[[:alnum:]@._+\-]+$' | sort -u)
+          ((${#deps[@]} > 0)) || { echo "!! 没解析到任何依赖"; exit 1; }
+          pacman -S --noconfirm --needed "${deps[@]}"
+          useradd -m builder
+          chown -R builder:builder "${GITHUB_WORKSPACE}"
+
+      - name: 构建 .pkg.tar.zst
+        if: steps.last.outputs.skip != 'true'
+        run: |
+          commit="${{ steps.upstream.outputs.sha }}"
+          runuser -u builder -- env HOME=/home/builder CARGO_INCREMENTAL=0 SOURCE_DATE_EPOCH=1 \
+            OPLUS_CONNECT_SOURCE_URL="file://$PWD#commit=$commit" \
+            makepkg --nocheck --noconfirm --nosign
+          sha256sum *.pkg.tar.zst
+
+      - name: 发布到 GitHub Release
+        if: steps.last.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          commit="${{ steps.upstream.outputs.sha }}"
+          pkg=$(ls *.pkg.tar.zst | head -1)
+          [[ -n "$pkg" ]] || { echo "!! 未找到 pkg.tar.zst"; exit 1; }
+          gh release create oplus-connect-latest \
+            --clobber --latest \
+            --title "oplus-connect" \
+            --notes "BUILD_SHA: $commit
+由 aur-auto-update CI 自动构建（YuKongA/oplus-connect@${commit:0:12}）
+
+安装: sudo pacman -U $pkg" \
+            "$pkg"
