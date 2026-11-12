@@ -17,17 +17,37 @@ run() {
 
   cur="$(srcinfo_val pkgver)"
   echo "  oplus-connect-private-bin: 当前 $cur，上游(CI Release) $last_ver"
-  [[ "$last_ver" == "$cur" ]] && { echo "  -> 无需更新"; return 0; }
 
   # digest 形如 "sha256:<hex>"，取冒号后段；没有就下载算
-  local stored
+  local stored sha
   stored="$(gh api "$capi" --jq --arg n "$asset" '.assets[] | select(.name==$n) | .digest // empty' 2>/dev/null || true)"
   sha="${stored#sha256:}"
   if [[ -z "$sha" ]]; then
     sha="$(shasum_of_url "https://github.com/Become-ILLUSORY/aur-auto-update/releases/download/oplus-connect-latest/$asset")" || { echo "  !! 计算 sha256 失败"; return 1; }
   fi
 
+  # 版本相同但 digest 不同 = 同一 commit 重新编译(stable) —— 也算更新：
+  # 必须同步 sha256 并 bump pkgrel，否则 AUR 永远锁着旧产物 checksum，
+  # 用户（尤其非本机）装到的是被打修 bug 替换前的旧二进制。
+  local cur_sha cur_rel
+  cur_sha="$(srcinfo_val sha256sums | tr -d "()'\"")"
+  cur_rel="$(srcinfo_val pkgrel)"
+  if [[ "$last_ver" == "$cur" ]]; then
+    if [[ "$cur_sha" != "$sha" ]]; then
+      local newrel=$((cur_rel + 1))
+      echo "  同版本但 digest 变化：$cur_sha -> $sha，pkgrel $cur_rel -> $newrel"
+      set_var PKGBUILD sha256sums "('$sha')"
+      set_var PKGBUILD pkgrel "$newrel"
+      gen_srcinfo
+      echo "  -- pkgrel bump + checksum 已同步"
+    else
+      echo "  -> 版本与 digest 均一致，无需更新"
+    fi
+    return 0
+  fi
+
   set_var PKGBUILD pkgver "$last_ver"
+  set_var PKGBUILD pkgrel 1
   set_var PKGBUILD sha256sums "('$sha')"
   gen_srcinfo
   echo "  -- 已更新 to $last_ver (sha256=$sha)"

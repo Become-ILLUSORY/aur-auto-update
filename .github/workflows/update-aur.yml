@@ -14,6 +14,11 @@ on:
 jobs:
   update:
     runs-on: ubuntu-latest
+    # 串行等 build-oplus：update-all.sh 读 oplus release asset 的 digest，
+    # 必须先等新产物发布完，否则吃不到重新编译的结果（digest 对不上）。
+    # if: always() 保证 build-oplus 失败时其余包不受影响照常更新。
+    needs: build-oplus
+    if: always()
     container:
       image: archlinux:latest
     steps:
@@ -161,11 +166,19 @@ jobs:
           # 直接 SIGILL (ILL_ILLOPN) 打不开。两个变量都覆盖，并清掉恢复的旧 avx512 target
           # 强制全量重编（只覆盖 RUSTFLAGS 时 cargo 会 0.36s Fresh 复用旧产物）。
           rm -rf src/target
-          # flag 必须连写 -Ctarget-cpu=…：upstream _cargo_build_env 用 read -a 按空格
-          # 分词再经 \x1f 拼接，写成 "-C target-cpu=…" 会被拆成两个参数，rustc 收
-          # 到 "opt name = ' target-cpu'" 直接 unknown codegen option 失败。
+          # 目标 = 最保守 baseline(x86-64 + SSE2)：自用包,6800H 跑互联类应用
+          # 与 AVX2 无体感差别,但默认编译天然不会产出 AVX-512,防止 runner 上
+          # 带 avx512 的 Xeon 把 checksum 快路径(如 crc, 长输入强制 zmm 分支)
+          # 编进产物导致无 avx512 的 AMD CPU 直接 SIGILL。
+          #
+          # 注意两个 env 都要显式设为【空】：
+          #  - CARGO_ENCODED_RUSTFLAGS：cachyos-v3 容器预置了带 avx512 的默认值,
+          #    upstream _cargo_build_env 优先读它;清空后走 RUSTFLAGS 分支。
+          #  - RUSTFLAGS：同样清空,之后 flags 只剩 _cargo_build_env 附加的
+          #    --remap-path-prefix,行为=纯默认 baseline 编译。
+          #  (写成 -Ctarget-cpu=… 连写会作用 target-cpu 但没必要且多一处维护)
           runuser -u builder -- env HOME=/home/builder CARGO_INCREMENTAL=0 SOURCE_DATE_EPOCH=1 \
-            CARGO_ENCODED_RUSTFLAGS=$'-Ctarget-cpu=x86-64-v3' RUSTFLAGS="-Ctarget-cpu=x86-64-v3" \
+            CARGO_ENCODED_RUSTFLAGS= RUSTFLAGS= \
             OPLUS_CONNECT_SOURCE_URL="file://$PWD#commit=$commit" \
             makepkg --nocheck --noconfirm --nosign
           sha256sum *.pkg.tar.zst
