@@ -93,7 +93,10 @@ jobs:
     steps:
       - name: 安装基础工具（archlinux 精简镜像无 git/gh，必须先装再用）
         run: |
-          pacman -Syy --noconfirm
+          # 镜像=构建时快照，仓库已是 openssl4：只用 -Syy 会拉到新版 openssl 破坏
+          # 镜像里旧 curl/cryptsetup 的依赖链(could not satisfy dependencies)。
+          # 必须 -Syu 先把镜像整体升到最新再装。
+          pacman -Syu --noconfirm
           pacman -S --noconfirm --needed github-cli git sudo ca-certificates jq
 
       - name: 查询上游最新 commit
@@ -133,7 +136,8 @@ jobs:
       - name: 安装构建依赖并建普通用户（makepkg 拒绝 root）
         if: steps.last.outputs.skip != 'true'
         run: |
-          pacman -Sy --noconfirm
+          # -Syu 保持系统最新（见上一步注释）；幂等，重复升级无害
+          pacman -Syu --noconfirm
           pacman -S --noconfirm --needed git sudo base-devel github-cli rust zstd
           mapfile -t deps < <(bash -c 'source PKGBUILD && printf "%s\n" "${depends[@]}" "${makedepends[@]}"' | grep -xE '^[[:alnum:]@._+\-]+$' | sort -u)
           ((${#deps[@]} > 0)) || { echo "!! 没解析到任何依赖"; exit 1; }
