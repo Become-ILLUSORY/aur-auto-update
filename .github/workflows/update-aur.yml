@@ -161,8 +161,11 @@ jobs:
           # 直接 SIGILL (ILL_ILLOPN) 打不开。两个变量都覆盖，并清掉恢复的旧 avx512 target
           # 强制全量重编（只覆盖 RUSTFLAGS 时 cargo 会 0.36s Fresh 复用旧产物）。
           rm -rf src/target
+          # flag 必须连写 -Ctarget-cpu=…：upstream _cargo_build_env 用 read -a 按空格
+          # 分词再经 \x1f 拼接，写成 "-C target-cpu=…" 会被拆成两个参数，rustc 收
+          # 到 "opt name = ' target-cpu'" 直接 unknown codegen option 失败。
           runuser -u builder -- env HOME=/home/builder CARGO_INCREMENTAL=0 SOURCE_DATE_EPOCH=1 \
-            CARGO_ENCODED_RUSTFLAGS=$'-C target-cpu=x86-64-v3' RUSTFLAGS="-C target-cpu=x86-64-v3" \
+            CARGO_ENCODED_RUSTFLAGS=$'-Ctarget-cpu=x86-64-v3' RUSTFLAGS="-Ctarget-cpu=x86-64-v3" \
             OPLUS_CONNECT_SOURCE_URL="file://$PWD#commit=$commit" \
             makepkg --nocheck --noconfirm --nosign
           sha256sum *.pkg.tar.zst
