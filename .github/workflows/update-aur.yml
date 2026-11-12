@@ -4,7 +4,12 @@ on:
   schedule:
     # 每天一次（UTC），覆盖 AUR 更新 + oplus-connect 编译发布
     - cron: '30 22 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force-rebuild-oplus:
+        description: '强制重建 oplus-connect（忽略 BUILD_SHA 对比）'
+        type: boolean
+        default: false
 
 jobs:
   update:
@@ -97,7 +102,10 @@ jobs:
         run: |
           last="$(gh release view oplus-connect-latest -R "$GITHUB_REPOSITORY" --json body --jq '.body' 2>/dev/null | sed -n 's/^BUILD_SHA: \([0-9a-f]\{40\}\)$/\1/p' || true)"
           echo "last=$last" >> "$GITHUB_OUTPUT"
-          if [[ -n "$last" && "$last" == "${{ steps.upstream.outputs.sha }}" ]]; then
+          if [[ "${{ inputs.force-rebuild-oplus }}" == "true" ]]; then
+            echo "手动强制重建"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$last" && "$last" == "${{ steps.upstream.outputs.sha }}" ]]; then
             echo "上游无新 commit，跳过构建"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -147,7 +155,11 @@ jobs:
         if: steps.last.outputs.skip != 'true'
         run: |
           commit="${{ steps.upstream.outputs.sha }}"
+          # 必须锁定 target-cpu=x86-64-v3：cachyos-v3 容器默认按 runner CPU 编译
+          # （GitHub Xeon 带 AVX-512），产物在无 AVX-512 的 AMD CPU 上直接 SIGILL
+          # （ILL_ILLOPN, vmovups %zmm）。v3 = avx2/fma 已覆盖本机 6800H。
           runuser -u builder -- env HOME=/home/builder CARGO_INCREMENTAL=0 SOURCE_DATE_EPOCH=1 \
+            RUSTFLAGS="-C target-cpu=x86-64-v3" \
             OPLUS_CONNECT_SOURCE_URL="file://$PWD#commit=$commit" \
             makepkg --nocheck --noconfirm --nosign
           sha256sum *.pkg.tar.zst
