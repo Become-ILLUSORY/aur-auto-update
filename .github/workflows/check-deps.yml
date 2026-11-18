@@ -1,0 +1,75 @@
+name: Check dependencies
+
+# 只读检查：在 archlinux 容器里用 pacman 实际解析 AUR 上各包的依赖，
+# 判断能否在官方仓库解析到，最后出一份报告。不构建、不 push、不碰 AUR。
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每周一次（UTC 周一 03:00），依赖随时间漂移时能主动发现
+    - cron: '0 3 * * 1'
+  push:
+    paths:
+      - 'packages/**'
+      - 'bootstrap/**'
+      - 'scripts/check-deps.sh'
+      - '.github/workflows/check-deps.yml'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 同步官方仓库数据库
+        run: |
+          # 镜像已是构建时快照，先整体升级再装，避免新旧 openssl 破坏依赖链
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed base-devel git curl jq
+
+      - name: 建普通用户（makepkg 拒绝 root）
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: 检查依赖
+        id: check
+        # 检查脚本自身有意 exit 0；这里再兜一层，任何意外都不让 job 变红
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/report
+          chown -R builder:builder /tmp/report
+          runuser -u builder -- env \
+            AUR_BASE="https://aur.archlinux.org" \
+            OUT="/tmp/report/out" \
+            bash scripts/check-deps.sh
+
+      - name: 写入本次运行摘要
+        if: always()
+        run: |
+          # 报告由 runner 写入 summary，避免 builder 用户对 _runner_file_commands 无写权限
+          if [[ -f /tmp/report/out/report.md ]]; then
+            cat /tmp/report/out/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deps-report
+          path: |
+            /tmp/report/out/report.md
+            /tmp/report/out/deps.tsv
+          if-no-files-found: warn
+
+      - name: 报告缺失时兜底
+        if: always() && steps.check.outcome == 'failure'
+        run: |
+          echo "## 依赖检查未能完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "检查脚本异常退出（脚本本身设计为不因检查结果失败），详情见本次 job 日志。" >> "$GITHUB_STEP_SUMMARY"
