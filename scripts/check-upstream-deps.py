@@ -137,6 +137,7 @@ def format_report(pkg_summary, rows):
     drift = sum(1 for _, _, v, _ in pkg_summary if v == "DRIFT")
     errors = sum(1 for _, _, v, _ in pkg_summary if v == "ERROR")
     out = ["## 上游依赖漂移检测", "", f"- 检查时间：{now_utc()}", f"- 检查包数：{len({p for p, _, _, _ in pkg_summary})}"]
+    out.append(f"- 上游源数量：{len(pkg_summary)}")
     out.append(f"- 发现漂移：{drift}")
     out.append(f"- 取数失败：{errors}")
     out.append("")
@@ -165,10 +166,17 @@ def format_report(pkg_summary, rows):
             out.append(f"| {pkg} | `{src}` | `{dep}` | {icon} {verdict} | {detail} |")
     extra_rows = [r for r in rows if r[3] == "EXTRA"]
     if extra_rows:
+        # 同一个包可能配置了多个上游源（如 fork + 官方），按 包+依赖 去重
+        seen, uniq = set(), []
+        for pkg, _src, dep, _, _ in extra_rows:
+            if (pkg, dep) in seen:
+                continue
+            seen.add((pkg, dep))
+            uniq.append((pkg, dep))
         out.append("")
         out.append("<details><summary>AUR 比上游多出的依赖（仅供核对，通常合理）</summary>")
         out.append("")
-        for pkg, src, dep, _, _ in extra_rows:
+        for pkg, dep in uniq:
             out.append(f"- {pkg}: `{dep}`")
         out.append("")
         out.append("</details>")
