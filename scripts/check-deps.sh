@@ -38,20 +38,28 @@ for pkg in "${PKGS[@]}"; do
     continue
   fi
 
-  if ! ( cd "$work" && makepkg --printsrcinfo > .SRCINFO 2>/dev/null ); then
-    printf '%s\t%s\t%s\tERROR\t%s\n' "$pkg" "-" "-" "makepkg --printsrcinfo 失败" >> "$TSV"
-    echo "  !! makepkg --printsrcinfo 失败"
-    continue
+  if ! ( cd "$work" && makepkg --printsrcinfo > .SRCINFO 2>"$work/makepkg.err" ); then
+    # install=/changelog= 指向的文件不在 AUR 网页接口里，先按名字补齐再试一次
+    if grep -qiE "install script|changelog|No such file" "$work/makepkg.err" 2>/dev/null; then
+      inst="$(sed -n "s/^[[:space:]]*install=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}[[:space:]]*$/\1/p" "$work/PKGBUILD" | head -n1)"
+      [[ -n "$inst" ]] && curl -fsSL --retry 2 --max-time 30 \
+        "$AUR_BASE/cgit/aur.git/plain/$inst?h=$pkg" -o "$work/$inst" 2>/dev/null || true
+    fi
+    if ! ( cd "$work" && makepkg --printsrcinfo > .SRCINFO 2>"$work/makepkg.err" ); then
+      printf '%s\t%s\t%s\tERROR\t%s\n' "$pkg" "-" "-" \
+        "makepkg 失败: $(tr '\n' ' ' < "$work/makepkg.err" | cut -c1-160)" >> "$TSV"
+      echo "  !! makepkg --printsrcinfo 失败"
+      continue
+    fi
   fi
 
-  # .SRCINFO 每行形如 "\tdepends = glibc"；按类别抽取，忽略架构后缀
-  mapfile -t ENTRIES < <(awk -F' = ' '
-    /^(depends|makedepends|optdepends)(_[a-z0-9_]+)? = / {
-      key = $1; val = $2
-      sub(/^[ \t]+/, "", key)
+  # .SRCINFO 每行形如 "\tdepends = glibc"（行首是 TAB），先去掉前导空白再匹配。
+  mapfile -t ENTRIES < <(sed 's/^[[:space:]]*//' "$work/.SRCINFO" | awk -F' = ' '
+    $1 ~ /^(depends|makedepends|optdepends)(_[a-z0-9_]+)?$/ {
+      key = $1
       sub(/_[a-z0-9_]+$/, "", key)
-      print key "\t" val
-    }' "$work/.SRCINFO")
+      print key "\t" $2
+    }')
 
   if [[ ${#ENTRIES[@]} -eq 0 ]]; then
     echo "  (无依赖条目)"
@@ -87,6 +95,9 @@ sort -u "$TSV" -o "$TSV"
 total=$(grep -c . "$TSV" || true)
 missing=$(grep -c $'\tMISSING\t' "$TSV" || true)
 errors=$(grep -c $'\tERROR\t' "$TSV" || true)
+# 硬依赖解析不到才是真问题；可选/构建依赖缺失只作提示
+hard_missing=$(awk -F'\t' '$4=="MISSING" && $3=="depends"' "$TSV" | wc -l)
+soft_missing=$(( missing - hard_missing ))
 
 {
   echo "## 依赖解析检查报告"
@@ -94,11 +105,16 @@ errors=$(grep -c $'\tERROR\t' "$TSV" || true)
   echo "- 检查时间：$(date -u '+%Y-%m-%d %H:%M UTC')"
   echo "- 包数量：${#PKGS[@]}"
   echo "- 依赖条目：${total}"
-  echo "- 解析失败：${missing}"
+  echo "- 硬依赖（depends）解析失败：${hard_missing}"
+  echo "- 可选/构建依赖解析失败：${soft_missing}"
   echo "- 检查出错：${errors}"
   echo
-  if (( missing > 0 )); then
-    echo "> **有 ${missing} 条依赖无法在官方仓库解析**，见下表 ❌ 行。"
+  if (( hard_missing > 0 )); then
+    echo "> **有 ${hard_missing} 条 depends 无法在官方仓库解析**，这些包会装不上，见下方 ❌ 行。"
+  elif (( missing > 0 )); then
+    echo "> 全部 depends 均可解析；有 ${missing} 条可选/构建依赖解析不到（多为 AUR 包或未收录，通常不影响安装）。"
+  elif (( errors > 0 )); then
+    echo "> 没有发现解析失败的依赖，但有 ${errors} 个包未能完成检查，见下方 ⚠️ 行。"
   else
     echo "> 全部依赖均可在官方仓库解析（已包含 provides 提供的虚拟包）。"
   fi
@@ -108,7 +124,7 @@ errors=$(grep -c $'\tERROR\t' "$TSV" || true)
   while IFS=$'\t' read -r p n c r res; do
     case "$r" in
       OK)      icon="✅" ;;
-      MISSING) icon="❌" ;;
+      MISSING) [[ "$c" == "depends" ]] && icon="❌" || icon="🔸" ;;
       *)       icon="⚠️" ;;
     esac
     printf '| %s | `%s` | %s | %s %s | %s |\n' "$p" "$n" "$c" "$icon" "$r" "$res"
