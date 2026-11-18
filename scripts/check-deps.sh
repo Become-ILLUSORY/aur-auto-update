@@ -42,7 +42,7 @@ for pkg in "${PKGS[@]}"; do
     # install=/changelog= 指向的文件不在 AUR 网页接口里，先按名字补齐再试一次
     if grep -qiE "install file|changelog" "$work/makepkg.err" 2>/dev/null; then
       # makepkg 的报错里直接带文件名（PKGBUILD 里常写成 $pkgname.install，无法静态展开）
-      mapfile -t missfiles < <(sed -n 's/.*file(\([^)]*\)) does not exist.*/\1/p' "$work/makepkg.err")
+      mapfile -t missfiles < <(sed -n 's/.*file *(\([^)]*\)) does not exist.*/\1/p' "$work/makepkg.err")
       for inst in "${missfiles[@]}"; do
         curl -fsSL --retry 2 --max-time 30 \
           "$AUR_BASE/cgit/aur.git/plain/$inst?h=$pkg" -o "$work/$inst" 2>/dev/null || true
