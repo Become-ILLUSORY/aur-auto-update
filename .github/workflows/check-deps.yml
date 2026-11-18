@@ -13,6 +13,8 @@ on:
       - 'packages/**'
       - 'bootstrap/**'
       - 'scripts/check-deps.sh'
+      - 'scripts/check-upstream-deps.py'
+      - 'scripts/upstream-deps.conf'
       - '.github/workflows/check-deps.yml'
 
 jobs:
@@ -49,12 +51,25 @@ jobs:
             OUT="/tmp/report/out" \
             bash scripts/check-deps.sh
 
+      - name: 检查上游依赖漂移
+        id: drift
+        # 同样是只读检查；失败也不让 job 变红
+        continue-on-error: true
+        run: |
+          python3 scripts/check-upstream-deps.py scripts/upstream-deps.conf \
+            > /tmp/report/drift.md 2>/tmp/report/drift.err || true
+          cat /tmp/report/drift.err >&2 || true
+
       - name: 写入本次运行摘要
         if: always()
         run: |
           # 报告由 runner 写入 summary，避免 builder 用户对 _runner_file_commands 无写权限
           if [[ -f /tmp/report/out/report.md ]]; then
             cat /tmp/report/out/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -s /tmp/report/drift.md ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat /tmp/report/drift.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: 上传报告
@@ -65,6 +80,7 @@ jobs:
           path: |
             /tmp/report/out/report.md
             /tmp/report/out/deps.tsv
+            /tmp/report/drift.md
           if-no-files-found: warn
 
       - name: 报告缺失时兜底
