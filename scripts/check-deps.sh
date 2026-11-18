@@ -13,17 +13,22 @@ AUR_BASE="${AUR_BASE:-https://aur.archlinux.org}"
 OUT="${OUT:-/tmp/deps-report}"
 SUMMARY="${REPORT:-}"
 
-rm -rf "$OUT"
-mkdir -p "$OUT"
+# 清理目录：允许失败（目录可能属主不同），失败也不该让检查中断
+rm -rf "$OUT" 2>/dev/null || true
+mkdir -p "$OUT" 2>/dev/null || true
 TSV="$OUT/deps.tsv"
-: > "$TSV"
+: > "$TSV" 2>/dev/null || { echo "!! 无法写入 $TSV"; exit 1; }
 
 mapfile -t PKGS < <(ls packages/pkg-*.sh 2>/dev/null | sed 's|.*/pkg-||; s|\.sh$||' | sort)
 if [[ ${#PKGS[@]} -eq 0 ]]; then
-  echo "!! 没有找到 packages/pkg-*.sh（工作目录不对？）"
-  exit 1
+  # 不用 exit 1：让 workflow 保持绿，信息写进报告与 annotation
+  echo "::error::没有找到 packages/pkg-*.sh（工作目录不对？）"
+  PKGS=()
+  NOINPUT=1
+else
+  NOINPUT=0
+  echo "共 ${#PKGS[@]} 个包待检查"
 fi
-echo "共 ${#PKGS[@]} 个包待检查"
 
 for pkg in "${PKGS[@]}"; do
   echo "===== $pkg"
@@ -94,12 +99,16 @@ for pkg in "${PKGS[@]}"; do
   done < <(printf '%s\n' "${ENTRIES[@]}")
 done
 
-sort -u "$TSV" -o "$TSV"
-total=$(grep -c . "$TSV" || true)
-missing=$(grep -c $'\tMISSING\t' "$TSV" || true)
-errors=$(grep -c $'\tERROR\t' "$TSV" || true)
+sort -u "$TSV" -o "$TSV" 2>/dev/null || true
+# grep -c 在无匹配时返回 1（且输出 0），加 || true 保证不会因 set -e 语义意外中断
+total=$(grep -c . "$TSV" 2>/dev/null || true)
+missing=$(grep -c $'\tMISSING\t' "$TSV" 2>/dev/null || true)
+errors=$(grep -c $'\tERROR\t' "$TSV" 2>/dev/null || true)
+: "${total:=0}" "${missing:=0}" "${errors:=0}"
 # 硬依赖解析不到才是真问题；可选/构建依赖缺失只作提示
 hard_missing=$(awk -F'\t' '$4=="MISSING" && $3=="depends"' "$TSV" | wc -l)
+hard_missing="${hard_missing//[^0-9]/}"
+: "${hard_missing:=0}"
 soft_missing=$(( missing - hard_missing ))
 
 {
@@ -112,12 +121,16 @@ soft_missing=$(( missing - hard_missing ))
   echo "- 可选/构建依赖解析失败：${soft_missing}"
   echo "- 检查出错：${errors}"
   echo
-  if (( hard_missing > 0 )); then
+  if (( NOINPUT == 1 )); then
+    echo "> **没有找到 packages/pkg-*.sh**，检查未执行（工作目录或 checkout 有问题）。"
+  elif (( hard_missing > 0 )); then
     echo "> **有 ${hard_missing} 条 depends 无法在官方仓库解析**，这些包会装不上，见下方 ❌ 行。"
+  elif (( total == 0 )); then
+    echo "> **未采集到任何依赖条目**，检查可能失效，请核对脚本。"
+  elif (( errors > 0 )); then
+    echo "> 已检查到的依赖中没有 depends 解析失败，但有 ${errors} 个包未能完成检查，结果不完整，见下方 ⚠️ 行。"
   elif (( missing > 0 )); then
     echo "> 全部 depends 均可解析；有 ${missing} 条可选/构建依赖解析不到（多为 AUR 包或未收录，通常不影响安装）。"
-  elif (( errors > 0 )); then
-    echo "> 没有发现解析失败的依赖，但有 ${errors} 个包未能完成检查，见下方 ⚠️ 行。"
   else
     echo "> 全部依赖均可在官方仓库解析（已包含 provides 提供的虚拟包）。"
   fi
