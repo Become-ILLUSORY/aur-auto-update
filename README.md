@@ -26,6 +26,12 @@ craft 系列（14 个）：`wordcraft` `deckcraft` `photocraft` `vectorcraft` `f
 
 每个包的 `run()` 独立、幂等：当前已是最新时就跳过。
 
+### 上游重发同版本资产
+
+`run()` 只看版本号，上游用同一 tag 重发 release（删掉重建，资产内容变了但版本号不变）时会被判定为"无需更新"，AUR 里锁的 sha256 就会失效，用户 `makepkg` 必然校验失败。
+
+`update-all.sh` 在 `run()` 之后额外跑一遍 `detect_upstream_republish`（`lib/common.sh`）：它不依赖包脚本，直接解析 `.SRCINFO` 里每个 `source` 的 URL 与 `sha256`，与 GitHub API 返回的 asset `digest`（GitHub 侧计算的真值）比对。不一致就写回新校验和并把 `pkgrel` +1（版本号没变但内容变了，不 bump 则已装该版本的用户不会升级）。仅当能定位到同一个 release 资产时才判定；release 被删或 API 查询失败一律放行，不做猜测。
+
 ## 手动运行
 
 ```bash

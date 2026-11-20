@@ -19,11 +19,21 @@ summary_add() { SUMMARY+=("$1|$2|$3|$4"); }
 
 # AUR 仓库是否已存在：git ls-remote 对不存在的包也返回空仓库(exit 0)，
 # 不可靠；用 AUR RPC v5 info 判断（resultcount>=1 = 已注册存在）。
+# 返回 0=存在，1=不存在，2=查询失败（网络抖动）。调用方必须区分 1 和 2，
+# 否则偶发的 RPC 失败会被当成"包不存在"而误触建仓。
 aur_exist() {
-  local r
-  r="$(curl -fsSL --retry 2 "https://aur.archlinux.org/rpc/v5/info?arg[]=$1" 2>/dev/null \
-       | jq -r '.resultcount // 0' 2>/dev/null || echo 0)"
-  (( r >= 1 ))
+  local r i
+  for i in 1 2 3; do
+    r="$(curl -fsSL --retry 2 --connect-timeout 15 \
+          "https://aur.archlinux.org/rpc/v5/info?arg[]=$1" 2>/dev/null \
+         | jq -r '.resultcount // empty' 2>/dev/null || true)"
+    if [[ "$r" =~ ^[0-9]+$ ]]; then
+      (( r >= 1 )) && return 0
+      return 1
+    fi
+    sleep 3
+  done
+  return 2
 }
 
 # AUR 首次建仓：bootstrap/<pkg>/ 存有初版 PKGBUILD+.SRCINFO，
@@ -69,8 +79,18 @@ run_one() {
 
   echo "===== [$pkg] 开始 ====="
   local wd="$WORK/$pkg"
-  if aur_exist "$pkg"; then
-    aur_clone "$pkg" "$wd"
+  local exist_rc=0
+  aur_exist "$pkg" || exist_rc=$?
+  if (( exist_rc == 0 )); then
+    if ! aur_clone "$pkg" "$wd"; then
+      echo "  !! [$pkg] 克隆 AUR 仓库失败（网络？），跳过本包"
+      summary_add "$pkg" "失败" "-" "git clone 失败（网络抖动？）"
+      return 0
+    fi
+  elif (( exist_rc == 2 )); then
+    echo "  !! [$pkg] AUR 存在性查询失败（网络？），跳过本包"
+    summary_add "$pkg" "跳过" "-" "AUR RPC 查询失败，未作判断"
+    return 0
   else
     echo "  [$pkg] AUR 仓库不存在，首次建仓"
     if ! init_pkg_repo "$pkg" "$wd"; then
@@ -98,6 +118,24 @@ run_one() {
   # 首次跟进时即使 run() 无新版本也要把它提交推上去。
   pushd "$wd" >/dev/null
     ensure_ghproxy
+
+    # run() 按版本号相同提前 return 时，上游仍可能重发了同一版本的资产，
+    # 使 AUR 锁定的 sha256 失效。此处按上游 digest 复核并写回。
+    local republish_rc=0
+    detect_upstream_republish || republish_rc=$?
+    if (( republish_rc == 1 )); then
+      :
+    elif (( republish_rc == 0 )); then
+      # pkgver 没变、内容变了：必须 bump pkgrel，否则已装该版本的用户不会升级
+      local rel
+      rel="$(srcinfo_val pkgrel)"
+      [[ "$rel" =~ ^[0-9]+$ ]] || rel=1
+      set_var PKGBUILD pkgrel "$((rel + 1))"
+      gen_srcinfo
+      echo "  -- 上游重发同版本，已更新校验和并 pkgrel ${rel} -> $((rel + 1))"
+    else
+      echo "  !! 重发检测失败，跳过该校验和"
+    fi
   popd >/dev/null
 
   local state="$(git -C "$wd" status --porcelain)"
