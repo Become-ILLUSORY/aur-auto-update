@@ -13,6 +13,7 @@ on:
       - 'packages/**'
       - 'bootstrap/**'
       - 'scripts/check-deps.sh'
+      - 'scripts/check-install-deps.sh'
       - 'scripts/check-upstream-deps.py'
       - 'scripts/upstream-deps.conf'
       - '.github/workflows/check-deps.yml'
@@ -89,3 +90,88 @@ jobs:
           echo "## 依赖检查未能完成" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "检查脚本异常退出（脚本本身设计为不因检查结果失败），详情见本次 job 日志。" >> "$GITHUB_STEP_SUMMARY"
+
+  # 真实安装检查：build 每个包，在「只装它声明的 depends」的干净环境里
+  # 扫描包内所有 ELF 的 NEEDED 能否解析。每测完一个包立即卸载回到基线，
+  # 否则上一个包的依赖会掩盖下一个包漏声明的依赖。
+  #
+  # 与上面 check job 的分工：check 只看依赖名能否解析；这里看二进制实际
+  # 需要的库有没有被 depends 覆盖 —— flclash-myflavor-bin 漏 libayatana-
+  # indicator 这类问题只有这一步能发现。
+  #
+  # 每个包一个 job 并行跑：单个包要下载上游产物（FlClash 的 deb 就 130MB），
+  # 22 个串行会超时。
+  prepare:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 jq
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed jq
+
+      - name: 列出待检查的包
+        id: list
+        run: |
+          pkgs="$(ls packages/pkg-*.sh 2>/dev/null | sed 's|.*/pkg-||; s|\.sh$||' | sort | jq -R . | jq -sc .)"
+          [[ -n "$pkgs" ]] || pkgs='[]'
+          echo "matrix=$pkgs" >> "$GITHUB_OUTPUT"
+          echo "待检查：$pkgs"
+
+  install-check:
+    needs: prepare
+    if: github.event_name != 'push' && needs.prepare.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      # 单个包失败不影响其他包
+      fail-fast: false
+      matrix:
+        pkg: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    container:
+      image: archlinux:latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 同步官方仓库数据库并装构建工具
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed base-devel git curl sudo
+
+      - name: 建普通用户（makepkg 拒绝 root）
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: 检查 ${{ matrix.pkg }}
+        id: install
+        # 脚本自身有意 exit 0；这里再兜一层，任何意外都不让 job 变红
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/install-check
+          ONLY="${{ matrix.pkg }}" bash scripts/check-install-deps.sh
+
+      - name: 写入本次运行摘要
+        if: always()
+        run: |
+          if [[ -f /tmp/install-check/report.md ]]; then
+            cat /tmp/install-check/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-deps-${{ matrix.pkg }}
+          path: |
+            /tmp/install-check/report.md
+            /tmp/install-check/install.tsv
+          if-no-files-found: warn

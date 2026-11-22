@@ -70,3 +70,24 @@ workflow（`.github/workflows/update-aur.yml`）每 6 小时自动跑一次，�
    - 版本落后就改 PKGBUILD（`set_var` / `set_checksum_item` / `shasum_of_url`），再 `gen_srcinfo`
 2. 用 `AUR_PUSH=0 bash update-all.sh packages/<pkg>.sh` dry-run 验证
 3. commit 推到本仓库即可
+
+## 依赖检查
+
+两个检查互补，都在 `.github/workflows/check-deps.yml`：
+
+| 脚本 | 做法 | 能发现 |
+|---|---|---|
+| `scripts/check-deps.sh` | 只 `pacman -Sp` 解析依赖名 | 依赖在仓库里不存在 |
+| `scripts/check-install-deps.sh` | 真实构建+安装，扫包内 ELF 的 NEEDED | depends 漏声明（库存在但没写进 depends） |
+
+后者是必需的：pacman 只校验 depends 能否解析，不关心二进制实际 NEEDED 了什么。`flclash-myflavor-bin` 就是典型——托盘插件直接链接 `libayatana-indicator3.so.7`，而 `libayatana-appindicator` 从 0.6.0 起不再传递依赖 `libayatana-indicator`。开发机上因为别的包装了它而一切正常，干净系统上托盘插件却加载失败。
+
+隔离方式：每个包都在「只装它自己声明的 depends」的环境里安装，测完立即卸载（连同依赖）回到基线，再测下一个。不隔离的话，上一个包的依赖会掩盖下一个包缺失的依赖，检查就形同虚设。每个包一个 matrix job 并行跑（单包要下载上游产物，串行会超时）。
+
+本地只查一个包：
+
+```bash
+sudo ONLY=flclash-myflavor-bin bash scripts/check-install-deps.sh
+```
+
+注意：这个检查会真实 `pacman -S`/`pacman -Rns`，只适合在容器或一次性环境里跑，别在主力机上执行。
