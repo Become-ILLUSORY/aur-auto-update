@@ -46,6 +46,147 @@ ver_cmp() {
 
 # ---------- PKGBUILD 编辑 ----------
 
+# ---------- GitHub 下载镜像（加速前缀） ----------
+#
+# gh-proxy.com 已对下载路径返回 403（"Access to proxy rules is forbidden on
+# this hostname"），但它仍代理 github.com 首页/仓库页（200），所以探测必须
+# 打真实下载 URL，否则会误判为"可用"。jsDelivr 只镜像 git 树（@tag/path）、
+# 不代理 release 资产，也无法替代。
+#
+# 探测只在维护端（update-all.sh / CI）发生：PKGBUILD 是静态文件，AUR 用户
+# makepkg 时不会探测，最终仍指向单一选定镜像。
+GH_MIRRORS=(
+  "https://gh-proxy.cn"
+  "https://gh-proxy.com"
+)
+
+# 探测某镜像能否代理给定 GitHub URL（取前 1KB）。
+# 注意：镜像对非下载路径常回 200/302 的落地页，所以只有拿到真实字节
+# （206 或 200 且真有内容）才算可用。
+probe_mirror() {
+  local prefix="$1" gh_url="$2" code size
+  read -r code size < <(curl -sL -o /dev/null -r 0-1023 -m 25 \
+                           -w '%{http_code} %{size_download}' \
+                           "$prefix/$gh_url" 2>/dev/null || echo "000 0")
+  [[ "$code" == 206 || "$code" == 200 ]] && [[ "${size:-0}" -gt 0 ]]
+}
+
+# 选一个可用镜像前缀（不带结尾斜杠，便于拼接）。
+# 全部探测失败时输出空串——调用方须区分"确实都挂了"与"网络抖动"：
+# 这里一律视为未知，由调用方决定是否保持现状，避免每次网络抖动都改 PKGBUILD。
+# 同一进程内只探测一轮，结果复用。
+pick_mirror() {
+  local gh_url="$1" m
+  if [[ "${_MIRROR_PICKED:-}" != 1 ]]; then
+    _MIRROR_PICKED=1
+    _MIRROR_SELECTED=""
+    for m in "${GH_MIRRORS[@]}"; do
+      if probe_mirror "$m" "$gh_url"; then
+        _MIRROR_SELECTED="$m"
+        echo "  -> 选用镜像 $m" >&2
+        break
+      fi
+      echo "  ?? 镜像不可用：$m" >&2
+    done
+    [[ -n "$_MIRROR_SELECTED" ]] || echo "  ?? 无可用镜像（可能是网络抖动）" >&2
+  fi
+  printf '%s\n' "$_MIRROR_SELECTED"
+}
+
+# 把 PKGBUILD 的 source 改写成"PKGBUILD 内变量 + 可覆盖"形式（幂等）：
+#
+#   _gh_mirror="${GH_MIRROR:-https://<默认镜像>/}"
+#   source=("x::${_gh_mirror}https://github.com/...")
+#
+# 用变量而非写死前缀：AUR 用户可 `makepkg GH_MIRROR=https://另一镜像/` 自行换源，
+# 镜像再挂也不必等维护端重推。honk-bin 那类已有 GITHUB_MIRROR 机制的包只更新默认值。
+#
+# 覆盖的现状写法：写死前缀 / 直连 / flclash 的 ${url} 相对写法。
+# url= 等非 source 字段不动。返回 0 = 有改动，1 = 无改动。
+ensure_mirror_var() {
+  local mirror="$1"
+  local before after
+  before="$(cat PKGBUILD)"
+
+  python3 - PKGBUILD "$mirror" <<'PY'
+import re, sys
+path, mirror = sys.argv[1], sys.argv[2]
+default = mirror.rstrip('/') + '/'
+src = open(path, encoding='utf-8').read()
+
+# honk-bin 式：已有 GITHUB_MIRROR 机制，只更新默认值（不带结尾斜杠）
+if re.search(r'^_github_mirror="\$\{GITHUB_MIRROR:-', src, re.M):
+    src = re.sub(r'^_github_mirror="\$\{GITHUB_MIRROR:-[^}]*\}"',
+                 f'_github_mirror="${{GITHUB_MIRROR:-{mirror.rstrip("/")}}}"',
+                 src, flags=re.M)
+    # 该机制自己就有归一化行（[[ -n ... ]] && ...%/}/），无需再插
+    open(path, 'w', encoding='utf-8').write(src)
+    raise SystemExit(0)
+
+# 先归一：剥掉任何旧前缀（含本函数上次加的），保证幂等
+src = re.sub(r'https://[A-Za-z0-9.-]+/https://github\.com/', 'https://github.com/', src)
+src = re.sub(r'https://[A-Za-z0-9.-]+/(\$\{url\}/)', r'\1', src)
+src = src.replace('${_gh_mirror}https://github.com/', 'https://github.com/')
+src = src.replace('${_gh_mirror}${url}/', '${url}/')
+
+# 给 source 行（含多行数组的续行）加 ${_gh_mirror}
+out, depth, in_source = [], 0, False
+for line in src.split('\n'):
+    starts_source = re.match(r'^source(_[A-Za-z0-9_]+)?=', line)
+    if starts_source:
+        in_source, depth = True, 0
+    if in_source:
+        line = line.replace('https://github.com/', '${_gh_mirror}https://github.com/')
+        line = line.replace('"${url}/', '"${_gh_mirror}${url}/')
+        line = line.replace('::${url}/', '::${_gh_mirror}${url}/')
+        depth += line.count('(') - line.count(')')
+        if depth <= 0:
+            in_source = False
+    out.append(line)
+src = '\n'.join(out)
+
+# 写入/更新 _gh_mirror 定义。覆盖时补结尾斜杠，避免用户传
+# GH_MIRROR=https://x 拼成 "https://xhttps://github.com/..."。
+m = re.search(r'^_gh_mirror=.*$', src, re.M)
+if m:
+    src = src[:m.start()] + f'_gh_mirror="${{GH_MIRROR:-{default}}}"' + src[m.end():]
+else:
+    anchor = re.search(r'^url=.*$', src, re.M)
+    if not anchor:
+        raise SystemExit('PKGBUILD 里找不到 url= 锚点，需手工插入 _gh_mirror')
+    block = ('\n# GitHub 下载加速镜像；换镜像可 makepkg GH_MIRROR=https://另一镜像/'
+             f'\n_gh_mirror="${{GH_MIRROR:-{default}}}"')
+    src = src[:anchor.end()] + block + src[anchor.end():]
+
+# 归一化结尾斜杠（放在 _gh_mirror 赋值之后）
+norm = '_gh_mirror="${_gh_mirror%/}/"\n'
+if norm not in src:
+    m = re.search(r'^_gh_mirror=.*\n', src, re.M)
+    src = src[:m.end()] + norm + src[m.end():]
+
+open(path, 'w', encoding='utf-8').write(src)
+PY
+
+  after="$(cat PKGBUILD)"
+  [[ "$before" != "$after" ]]
+}
+
+# 当前 PKGBUILD 用的镜像（默认值），没有则输出空串。
+current_mirror() {
+  local m
+  m="$(grep -oE '^\s*(_gh_mirror|_github_mirror)="\$\{(GH|GITHUB)_MIRROR:-[^}]*\}"' PKGBUILD 2>/dev/null | head -1 || true)"
+  printf '%s\n' "$m" | sed -E 's/.*:-([^}]*)\}"?$/\1/'
+}
+
+# pkgrel +1：内容变了但 pkgver 没变时必须 bump，否则已装该版本的用户不会升级。
+bump_pkgrel() {
+  local rel
+  rel="$(srcinfo_val pkgrel)"
+  [[ "$rel" =~ ^[0-9]+$ ]] || rel=1
+  set_var PKGBUILD pkgrel "$((rel + 1))"
+  printf '%s\n' "$((rel + 1))"
+}
+
 # 在 PKGBUILD 里把 key=value 替换为新值（key 须以变量名 + = 独立成行）。
 set_var() {
   local file="$1" key="$2" value="$3"
@@ -179,10 +320,14 @@ gh_api_retry() {
   return 1
 }
 
-# 剥掉 gh-proxy 之类加速前缀，还原真实上游 URL。
+# 剥掉加速镜像前缀，还原真实上游 URL。匹配任意 "https://<host>/https://github.com/"
+# 形式（不写死域名），换镜像后无需改这里。用参数展开而非 BASH_REMATCH：
+# 后者在 set -u 下遇到未匹配会报 "BASH_REMATCH[1]: parameter not set"。
 _strip_mirror() {
   local u="$1"
-  [[ "$u" == *"gh-proxy.com/"* ]] && u="${u#*gh-proxy.com/}"
+  case "$u" in
+    */https://github.com/*) u="https://github.com/${u#*/https://github.com/}" ;;
+  esac
   printf '%s\n' "$u"
 }
 

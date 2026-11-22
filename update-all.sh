@@ -56,18 +56,36 @@ init_pkg_repo() {
   fi
 }
 
-# craft 包下载加速：给源 PKGBUILD 里的 storytold release URL 加 gh-proxy.com 前缀（幂等）。
+# 下载加速：把 PKGBUILD source 里的 GitHub release URL 挂到可用镜像前缀下（幂等）。
 # 无别名也行——srcdir 文件名=URL 末段，与 package() 引用一致。
-ensure_ghproxy() {
-  if grep -q 'gh-proxy.com' PKGBUILD; then
-    echo "  -> source 已含 gh-proxy.com"
+# 镜像失效（如 gh-proxy.com 403）时会自动迁移到可用镜像并 bump pkgrel。
+ensure_mirror() {
+  local prefix gh_url rel
+  # 探测目标必须取 .SRCINFO 里 source 的真实下载 URL（剥掉旧前缀）。
+  # 不能用仓库首页充当目标：镜像对首页回 200、对下载却 403，会误判。
+  gh_url="$(grep -oE 'https://github\.com/[^"'"'"' )]+' .SRCINFO 2>/dev/null \
+            | grep -E '/releases/download/|/archive/refs/' | head -1 || true)"
+  if [[ -z "$gh_url" ]]; then
+    echo "  -> source 里没有可探测的 GitHub 下载 URL，跳过镜像处理"
     return 0
   fi
-  if grep -q 'https://github.com/storytold/' PKGBUILD; then
-    sed -i 's|https://github.com/storytold/|https://gh-proxy.com/https://github.com/storytold/|' PKGBUILD
-    gen_srcinfo
-    echo "  -- source 已加 gh-proxy.com 前缀"
+
+  prefix="$(pick_mirror "$gh_url")"
+
+  # 全部探测失败：可能是网络抖动而非镜像真挂，保持现状不改 PKGBUILD。
+  # 否则每次抖动都会把 source 退回直连、bump pkgrel，下次又加回镜像，来回横跳。
+  if [[ -z "$prefix" ]]; then
+    local cur
+    cur="$(current_mirror)"
+    echo "  ?? 镜像探测全部失败，保持现状（当前：${cur:-直连}），不改 PKGBUILD"
+    return 0
   fi
+
+  ensure_mirror_var "$prefix" || { echo "  -> 镜像默认值已是最新"; return 0; }
+
+  rel="$(bump_pkgrel)"
+  gen_srcinfo
+  echo "  -- 镜像默认值改为 $prefix，pkgrel -> $rel"
 }
 
 # ---- 单个包的一次性处理 ----
@@ -108,16 +126,19 @@ run_one() {
   local ver
   ver="$(cd "$wd" && srcinfo_val pkgver 2>/dev/null || echo '-')"
 
+  # run() 失败不立刻返回：镜像迁移与重发检测不依赖"查到上游新版本"，
+  # 上游 API 抖动时仍应把 source 前缀修正推上去。失败信息记在备注里。
+  local run_failed=0 run_note=""
   if (( run_rc != 0 )); then
-    echo "  !! [$pkg] run() 失败(rc=$run_rc)，跳过"
-    summary_add "$pkg" "失败" "$ver" "run() 退出码 $run_rc（见上方日志）"
-    return 0
+    run_failed=1
+    run_note="run() 退出码 $run_rc（见上方日志）"
+    echo "  !! [$pkg] run() 失败(rc=$run_rc)，仍尝试镜像修正"
   fi
 
-  # craft 等包的 gh-proxy 前缀补丁：无条件执行（幂等），
-  # 首次跟进时即使 run() 无新版本也要把它提交推上去。
+  # 下载镜像前缀：无条件执行（幂等），镜像失效时自动迁移到可用镜像。
+  # 首次跟进时即使 run() 无新版本也要把前缀修正提交推上去。
   pushd "$wd" >/dev/null
-    ensure_ghproxy
+    ensure_mirror
 
     # run() 按版本号相同提前 return 时，上游仍可能重发了同一版本的资产，
     # 使 AUR 锁定的 sha256 失效。此处按上游 digest 复核并写回。
@@ -128,11 +149,9 @@ run_one() {
     elif (( republish_rc == 0 )); then
       # pkgver 没变、内容变了：必须 bump pkgrel，否则已装该版本的用户不会升级
       local rel
-      rel="$(srcinfo_val pkgrel)"
-      [[ "$rel" =~ ^[0-9]+$ ]] || rel=1
-      set_var PKGBUILD pkgrel "$((rel + 1))"
+      rel="$(bump_pkgrel)"
       gen_srcinfo
-      echo "  -- 上游重发同版本，已更新校验和并 pkgrel ${rel} -> $((rel + 1))"
+      echo "  -- 上游重发同版本，已更新校验和并 pkgrel -> $rel"
     else
       echo "  !! 重发检测失败，跳过该校验和"
     fi
@@ -161,6 +180,8 @@ run_one() {
     action="DRY-RUN"
     note="有改动，未 push（AUR_PUSH=0）"
   fi
+  # run() 失败时即便镜像已修正，这个包仍算失败（上游状态没跟上）
+  (( run_failed )) && { action="失败"; note="$run_note"; }
   summary_add "$pkg" "$action" "$ver" "$note"
 }
 
