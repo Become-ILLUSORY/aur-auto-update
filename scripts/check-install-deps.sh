@@ -81,6 +81,53 @@ srcinfo_deps() {
     | grep -vE '^\$|^$' || true
 }
 
+# PKGBUILD 里的 _gh_mirror 是 URL 前缀："${_gh_mirror}${url}"，默认值是面向
+# 国内的 gh-proxy.cn。CI runner 在美国，未必通得了国内镜像。
+#
+# 与其和前缀变量较劲（${VAR:-默认} 会把空串回落成默认，没法表示"不要前缀"），
+# 不如先把 source 直连 GitHub 下载到 SRCDEST：makepkg 发现缓存命中就不再下载，
+# 前缀写什么都不影响。直连失败再回落到镜像。
+#
+# 文件名规则与 makepkg 一致：source 写成 "文件名::URL" 时用文件名，否则取
+# URL 的 basename。
+
+strip_mirror_prefix() {
+  local url="$1" m
+  for m in "https://gh-proxy.cn" "https://gh-proxy.com"; do
+    [[ "$url" == "$m/"* ]] && { printf '%s\n' "${url#"$m/"}"; return 0; }
+  done
+  printf '%s\n' "$url"
+}
+
+# 把 .SRCINFO 里的 http(s) source 下载到 srcdest。已存在则跳过。
+prefetch_sources() {
+  local srcinfo="$1" dest="$2"
+  mkdir -p "$dest"
+  local entry fname url real
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    if [[ "$entry" == *"::"* ]]; then
+      fname="${entry%%::*}"
+      url="${entry#*::}"
+    else
+      url="$entry"
+      fname="${url##*/}"
+    fi
+    [[ "$url" == http* ]] || continue
+    [[ -n "$fname" && -f "$dest/$fname" ]] && continue
+
+    real="$(strip_mirror_prefix "$url")"
+    if curl -fL --retry 2 --max-time 300 -o "$dest/$fname" "$real" 2>/dev/null; then
+      echo "  ↓ 预下载 $fname（直连）"
+    elif [[ "$real" != "$url" ]] && curl -fL --retry 2 --max-time 300 -o "$dest/$fname" "$url" 2>/dev/null; then
+      echo "  ↓ 预下载 $fname（镜像）"
+    else
+      echo "  ?? 预下载失败 $fname，留给 makepkg 自己处理"
+      rm -f "$dest/$fname"
+    fi
+  done < <(sed -n 's/^[[:space:]]*source\(_[a-z0-9_]*\)\{0,1\} = //p' "$srcinfo" 2>/dev/null)
+}
+
 # 扫描已装包的所有 ELF，把解析不到的 NEEDED 写进 TSV。
 #
 # 不用 ldd：ldd 对某些格式会实际执行二进制（上游产物不可信），这里改用
@@ -137,7 +184,6 @@ for pkg in "${PKGS[@]}"; do
   mkdir -p "$work"
 
   reset_to_baseline
-
   if ! git clone --depth 1 -q "$AUR_BASE/$pkg.git" "$work/repo" 2>"$work/clone.err"; then
     printf '%s\t%s\t%s\tERROR\n' "$pkg" "clone 失败" "-" >> "$TSV"
     echo "  !! 克隆 AUR 仓库失败"
@@ -153,20 +199,35 @@ for pkg in "${PKGS[@]}"; do
   if ((${#build_deps[@]})); then
     if ! pacman -S --noconfirm --needed --asdeps "${build_deps[@]}" >"$work/deps.log" 2>&1; then
       printf '%s\t%s\t%s\tERROR\n' "$pkg" "依赖装不上" "-" >> "$TSV"
-      echo "  !! depends/makedepends 装不上，见 $work/deps.log"
+      echo "  !! depends/makedepends 装不上，日志尾部："
+      tail -n 15 "$work/deps.log" | sed 's/^/     | /'
       reset_to_baseline
       continue
     fi
   fi
 
   chown -R "$BUILD_USER:$BUILD_USER" "$work"
-  # 构建时把 GH_MIRROR 指到 GitHub 官方地址：CI 在境外，直连最快；默认值是
-  # 给国内用户准备的第三方加速镜像，镜像挂掉会被误判成构建失败。
-  if ! runuser -u "$BUILD_USER" -- env HOME="/home/$BUILD_USER" GH_MIRROR="https://github.com/" \
+
+  # 预下载 source 到 SRCDEST：直连 GitHub 优先，失败再试镜像。命中缓存后
+  # makepkg 不再走 PKGBUILD 里那个国内镜像前缀，避免 CI（美国 runner）因
+  # 镜像不通而误判成构建失败。
+  srcdest="$work/srcdest"
+  prefetch_sources "$work/repo/.SRCINFO" "$srcdest"
+  chown -R "$BUILD_USER:$BUILD_USER" "$srcdest" 2>/dev/null || true
+
+  if ! runuser -u "$BUILD_USER" -- env HOME="/home/$BUILD_USER" SRCDEST="$srcdest" \
       bash -c "cd '$work/repo' && makepkg -f --nodeps --noconfirm --nocheck" \
       >"$work/build.log" 2>&1; then
-    printf '%s\t%s\t%s\tERROR\n' "$pkg" "构建失败" "-" >> "$TSV"
-    echo "  !! 构建失败，见 $work/build.log"
+    # 下载失败不等于包有问题：CI 在境外，PKGBUILD 里的国内镜像可能不通。
+    # 明确区分，避免把网络问题误读成依赖缺失。
+    if grep -qiE "failure while downloading|failed to retrieve|Could not resolve host|Connection timed out" "$work/build.log"; then
+      printf '%s\t%s\t%s\tERROR\n' "$pkg" "下载失败（网络/镜像）" "-" >> "$TSV"
+      echo "  !! 源码下载失败（网络问题，非依赖问题），日志尾部："
+    else
+      printf '%s\t%s\t%s\tERROR\n' "$pkg" "构建失败" "-" >> "$TSV"
+      echo "  !! 构建失败，日志尾部："
+    fi
+    tail -n 25 "$work/build.log" | sed 's/^/     | /'
     reset_to_baseline
     rm -rf "$work"
     continue
@@ -190,7 +251,8 @@ for pkg in "${PKGS[@]}"; do
   # split package 会产出多个 .pkg.tar.*，全部装上再扫描（否则漏测其余子包）
   if ! pacman -U --noconfirm --asdeps "${built[@]}" >"$work/install.log" 2>&1; then
     printf '%s\t%s\t%s\tERROR\n' "$pkg" "安装失败" "-" >> "$TSV"
-    echo "  !! pacman -U 安装失败，见 $work/install.log"
+    echo "  !! pacman -U 安装失败，日志尾部："
+    tail -n 15 "$work/install.log" | sed 's/^/     | /'
     reset_to_baseline
     rm -rf "$work"
     continue
