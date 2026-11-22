@@ -128,15 +128,57 @@ prefetch_sources() {
   done < <(sed -n 's/^[[:space:]]*source\(_[a-z0-9_]*\)\{0,1\} = //p' "$srcinfo" 2>/dev/null)
 }
 
+# 判断某 soname 是否由当前包的 optdepends 提供。optdepends 是可选的，
+# 缺它们属设计意图（如不装 alsa-lib 就没有声音），不算漏依赖。
+# 结果按包缓存在 OPTDEPS_SONAMES，避免重复解析。
+OPTDEPS_SONAMES=""
+
+soname_in_optdeps() {
+  local soname="$1"
+  [[ -z "$OPTDEPS_SONAMES" ]] && return 1
+  grep -qxF "$soname" <<< "$OPTDEPS_SONAMES"
+}
+
+# 收集包 optdepends 对应的 soname 集合（写入 OPTDEPS_SONAMES）。
+# 优先从 .SRCINFO 取 optdepends（格式规范，每行一项），回落到 pacman -Qi。
+collect_optdeps_sonames() {
+  local pkg="$1" srcinfo="${2:-}"
+  OPTDEPS_SONAMES=""
+  local -a optpkgs=()
+
+  if [[ -n "$srcinfo" && -f "$srcinfo" ]]; then
+    mapfile -t optpkgs < <(sed -n 's/^[[:space:]]*optdepends\(_[a-z0-9_]*\)\{0,1\} = //p' "$srcinfo" \
+      | sed 's/:.*//' | sed 's/[[:space:]]*$//' | grep -vE '^$|^\$')
+  else
+    mapfile -t optpkgs < <(pacman -Qi "$pkg" 2>/dev/null \
+      | sed -n 's/^可选依赖[[:space:]]*: //p' \
+      | sed 's/  /\n/g' | sed 's/:.*//' | grep -vE '^$|^无$')
+  fi
+
+  local p sons
+  for p in "${optpkgs[@]}"; do
+    # 未安装的 optdepends 查不到文件列表，跳过即可
+    while IFS= read -r sons; do
+      [[ -n "$sons" ]] && OPTDEPS_SONAMES+="$sons"$'\n'
+    done < <(pacman -Ql "$p" 2>/dev/null | awk '{print $2}' | sed -n 's|.*/\([^/]*\.so[.0-9]*\)$|\1|p')
+  done
+  OPTDEPS_SONAMES="$(printf '%s' "$OPTDEPS_SONAMES" | grep . | sort -u)"
+}
+
 # 扫描已装包的所有 ELF，把解析不到的 NEEDED 写进 TSV。
 #
 # 不用 ldd：ldd 对某些格式会实际执行二进制（上游产物不可信），这里改用
 # readelf 静态取 NEEDED，再按动态链接器的搜索顺序找文件，结果确定且不执行代码。
 # 包内私有 .so 目录加进搜索路径，模拟启动脚本的 LD_LIBRARY_PATH。
+#
+# 跳过 /usr/lib/debug/：makepkg 默认开 debug 包，那些 .debug 文件是 stripped
+# 二进制的调试信息副本，不是运行时加载的库，它们的 NEEDED 与真实运行无关。
 scan_package() {
-  local pkg="$1"
+  local pkg="$1" srcinfo="${2:-}"
   local -a files=() libdirs=() elfs=()
-  mapfile -t files < <(pacman -Ql "$pkg" 2>/dev/null | awk '{print $2}' | grep -v '/$')
+  collect_optdeps_sonames "$pkg" "$srcinfo"
+  mapfile -t files < <(pacman -Ql "$pkg" 2>/dev/null | awk '{print $2}' \
+    | grep -v '/$' | grep -v '^/usr/lib/debug/')
 
   local f
   for f in "${files[@]}"; do
@@ -164,6 +206,12 @@ scan_package() {
         [[ -e "$d/$soname" ]] && { hit="$d/$soname"; break; }
       done
       [[ -n "$hit" ]] && continue
+      # 由已声明的 optdepends 提供的库算通过：可选功能缺失是设计意图，
+      # 不是漏依赖（如 alsa-lib 之于音频支持）。
+      if soname_in_optdeps "$soname"; then
+        echo "  · $soname 由 optdepends 提供（可选功能，跳过）"
+        continue
+      fi
       printf '%s\t%s\t%s\tMISSING\n' "$pkg" "$soname" "${f#/}" >> "$TSV"
       echo "  !! $soname 未解析（需要它的文件：${f#/}）"
       missing=$((missing + 1))
@@ -266,7 +314,7 @@ for pkg in "${PKGS[@]}"; do
   ((${#built_names[@]})) || built_names=("$pkg")
 
   for n in "${built_names[@]}"; do
-    scan_package "$n"
+    scan_package "$n" "$work/repo/.SRCINFO"
   done
 
   reset_to_baseline
