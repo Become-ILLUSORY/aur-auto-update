@@ -133,6 +133,20 @@ prefetch_sources() {
 # 结果按包缓存在 OPTDEPS_SONAMES，避免重复解析。
 OPTDEPS_SONAMES=""
 
+# 仓库文件数据库是否可用（pacman -Fl 能查未安装包的文件列表）。
+# optdepends 大多没装，靠它反查 soname 归属。
+FILE_DB_OK=0
+if pacman -Fl alsa-lib >/dev/null 2>&1; then
+  FILE_DB_OK=1
+else
+  echo "同步仓库文件数据库（pacman -Fy）..."
+  if pacman -Fy --noconfirm >/dev/null 2>&1 && pacman -Fl alsa-lib >/dev/null 2>&1; then
+    FILE_DB_OK=1
+  else
+    echo "!! 文件数据库不可用，未安装的 optdepends 将无法反查（可能误报）"
+  fi
+fi
+
 soname_in_optdeps() {
   local soname="$1"
   [[ -z "$OPTDEPS_SONAMES" ]] && return 1
@@ -141,6 +155,9 @@ soname_in_optdeps() {
 
 # 收集包 optdepends 对应的 soname 集合（写入 OPTDEPS_SONAMES）。
 # 优先从 .SRCINFO 取 optdepends（格式规范，每行一项），回落到 pacman -Qi。
+#
+# optdepends 通常没装，pacman -Ql 查不到文件列表，所以用仓库文件数据库
+# （pacman -Fl）反查它提供哪些 .so。数据库由脚本启动时统一同步一次。
 collect_optdeps_sonames() {
   local pkg="$1" srcinfo="${2:-}"
   OPTDEPS_SONAMES=""
@@ -157,10 +174,17 @@ collect_optdeps_sonames() {
 
   local p sons
   for p in "${optpkgs[@]}"; do
-    # 未安装的 optdepends 查不到文件列表，跳过即可
+    # 已装的包用 -Ql 最准；没装的走 -Fl（仓库文件数据库）
+    local src=""
+    if pacman -Qq "$p" >/dev/null 2>&1; then
+      src="$(pacman -Ql "$p" 2>/dev/null | awk '{print $2}')"
+    elif (( FILE_DB_OK )); then
+      src="$(pacman -Fl "$p" 2>/dev/null | awk '{print $2}')"
+    fi
+    [[ -n "$src" ]] || continue
     while IFS= read -r sons; do
       [[ -n "$sons" ]] && OPTDEPS_SONAMES+="$sons"$'\n'
-    done < <(pacman -Ql "$p" 2>/dev/null | awk '{print $2}' | sed -n 's|.*/\([^/]*\.so[.0-9]*\)$|\1|p')
+    done < <(printf '%s\n' "$src" | sed -n 's|.*/\([^/]*\.so[.0-9]*\)$|\1|p')
   done
   OPTDEPS_SONAMES="$(printf '%s' "$OPTDEPS_SONAMES" | grep . | sort -u)"
 }
