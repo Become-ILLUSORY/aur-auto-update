@@ -15,6 +15,7 @@
 | `uu-remote-linux-private-bin` | VallierDev/uu-remote-linux | release | 非官方 UU 远程被控端，source 走 GitHub 镜像加速（`lib/common.sh` 按可用性优选），镜像官方 .deb 布局，双架构 checksum 锁伴随 .sha256 |
 | `oplus-connect-private-bin` | YuKongA/oplus-connect（本仓库 build-oplus 自编译） | 本仓库 GitHub Release | CI 用 cachyos-v3 编译出 `.pkg.tar.zst` 发到 `oplus-connect-latest`，AUR 包重打包它；版本=上游 git rev-count `1.0.0.r<N>.g<sha>`，checksum 取 Release asset digest |
 | `misterdownloadmanager-private-bin` | anefzaoui/misterdownloadmanager | release | 预编译 Linux tar.gz 重打包，checksum 取上游 `SHA256SUMS.txt`；上游 tar.gz 不含 `.desktop`/图标，由 PKGBUILD 补 |
+| `crossdesk-private-bin` | kunkundi/crossdesk | release | 官方 `.deb` 重打包，保留 deb 原布局（上游自更新器写死 `/usr/lib/crossdesk/crossdesk-bin`；它还需 `apt-get`，Arch 上只会提示手动更新）；双架构 checksum；版本来源取 `releases[0]` 而非 `releases/latest`（该仓库 `latest` 已固化为旧 tag）；tag `v1.7.6-20261112` → pkgver `1.7.6.20261112`（日期并入版本号，便于检出同版本重发） |
 
 craft 系列（14 个）：`wordcraft` `deckcraft` `photocraft` `vectorcraft` `filmcraft` `lightcraft` `pdfcraft` `effectcraft` `designcraft` `figcraft` `soundcraft` `cadcraft` `gridcraft` `texturecraft`，均为 `*-private-bin` 自用包，脚本由 `/tmp` 生成的统一模板派生。
 
