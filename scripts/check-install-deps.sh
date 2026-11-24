@@ -51,7 +51,7 @@ reset_to_baseline() {
 }
 
 mapfile -t PKGS < <(ls packages/pkg-*.sh 2>/dev/null | sed 's|.*/pkg-||; s|\.sh$||' | sort)
-# 可只查指定包：ONLY="flclash-myflavor-bin honk-bin"（也接受逗号/空格混合）
+# 可只查指定包：ONLY="flclash-myflavor-bin uu-remote-linux-private-bin"（也接受逗号/空格混合）
 if [[ -n "${ONLY:-}" ]]; then
   declare -a wanted=()
   read -ra wanted <<< "${ONLY//,/ }"

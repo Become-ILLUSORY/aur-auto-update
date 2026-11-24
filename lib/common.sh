@@ -53,44 +53,72 @@ ver_cmp() {
 # 打真实下载 URL，否则会误判为"可用"。jsDelivr 只镜像 git 树（@tag/path）、
 # 不代理 release 资产，也无法替代。
 #
+# 只保留一个镜像：多镜像按顺序探测时，runner 网络抖动会让首选偶发失败、
+# 回落到次选，写入 PKGBUILD 后下次又切回来——每个包每天来回横跳并 bump
+# pkgrel，制造大量"无内容变化"的提交。单一镜像 + 探测重试杜绝横跳。
+#
 # 探测只在维护端（update-all.sh / CI）发生：PKGBUILD 是静态文件，AUR 用户
-# makepkg 时不会探测，最终仍指向单一选定镜像。
+# makepkg 时不会探测，最终仍指向选定镜像；用户可 makepkg GH_MIRROR=... 覆盖。
 GH_MIRRORS=(
   "https://gh-proxy.cn"
-  "https://gh-proxy.com"
 )
 
 # 探测某镜像能否代理给定 GitHub URL（取前 1KB）。
 # 注意：镜像对非下载路径常回 200/302 的落地页，所以只有拿到真实字节
 # （206 或 200 且真有内容）才算可用。
+# CI runner 的出口网络偶发超时，单次失败不可信：重试 3 次，任一成功即算可用。
 probe_mirror() {
-  local prefix="$1" gh_url="$2" code size
-  read -r code size < <(curl -sL -o /dev/null -r 0-1023 -m 25 \
-                           -w '%{http_code} %{size_download}' \
-                           "$prefix/$gh_url" 2>/dev/null || echo "000 0")
-  [[ "$code" == 206 || "$code" == 200 ]] && [[ "${size:-0}" -gt 0 ]]
+  local prefix="$1" gh_url="$2" code size i
+  for i in 1 2 3; do
+    read -r code size < <(curl -sL -o /dev/null -r 0-1023 -m 25 \
+                             -w '%{http_code} %{size_download}' \
+                             "$prefix/$gh_url" 2>/dev/null || echo "000 0")
+    [[ "$code" == 206 || "$code" == 200 ]] && [[ "${size:-0}" -gt 0 ]] && return 0
+    (( i < 3 )) && sleep 2
+  done
+  return 1
 }
 
-# 选一个可用镜像前缀（不带结尾斜杠，便于拼接）。
-# 全部探测失败时输出空串——调用方须区分"确实都挂了"与"网络抖动"：
+# 选一个可用镜像前缀（不带结尾斜杠，便于拼接），结果写入 _MIRROR_SELECTED。
+# 空串表示全部探测失败——调用方须区分"确实都挂了"与"网络抖动"：
 # 这里一律视为未知，由调用方决定是否保持现状，避免每次网络抖动都改 PKGBUILD。
-# 同一进程内只探测一轮，结果复用。
+#
+# 必须是 setter 而非"打印到 stdout"的函数：调用方用命令替换 `$(...)` 会在
+# 子 shell 里跑，缓存变量赋值全部丢失，每个包都会重新探测一轮、各自横跳。
+# 正确用法：
+#   pick_mirror "$gh_url"; prefix="$_MIRROR_SELECTED"
+#
+# 探测顺序：先探当前已用的镜像，可用就保持不动，杜绝
+# "抖动→回落到次选→下次又切回"的横跳。但只有当前镜像仍在 GH_MIRRORS
+# 白名单里才保持——已从名单移除的域名必须迁移走。
 pick_mirror() {
-  local gh_url="$1" m
-  if [[ "${_MIRROR_PICKED:-}" != 1 ]]; then
-    _MIRROR_PICKED=1
-    _MIRROR_SELECTED=""
-    for m in "${GH_MIRRORS[@]}"; do
-      if probe_mirror "$m" "$gh_url"; then
-        _MIRROR_SELECTED="$m"
-        echo "  -> 选用镜像 $m" >&2
-        break
-      fi
-      echo "  ?? 镜像不可用：$m" >&2
-    done
-    [[ -n "$_MIRROR_SELECTED" ]] || echo "  ?? 无可用镜像（可能是网络抖动）" >&2
+  local gh_url="$1" m cur
+  # 整轮只探测一次：上游各包都挂在同一个代理域名下，探测结果共用。
+  if [[ "${_MIRROR_PICKED:-}" == 1 ]]; then
+    return 0
   fi
-  printf '%s\n' "$_MIRROR_SELECTED"
+  _MIRROR_SELECTED=""
+  cur="$(current_mirror)"
+  cur="${cur%/}"
+  if [[ -n "$cur" ]] && printf '%s\n' "${GH_MIRRORS[@]}" | grep -qxF "$cur" \
+     && probe_mirror "$cur" "$gh_url"; then
+    _MIRROR_SELECTED="$cur"
+    _MIRROR_PICKED=1
+    echo "  -> 当前镜像可用，保持 $cur" >&2
+    return 0
+  fi
+  for m in "${GH_MIRRORS[@]}"; do
+    if probe_mirror "$m" "$gh_url"; then
+      _MIRROR_SELECTED="$m"
+      _MIRROR_PICKED=1
+      echo "  -> 选用镜像 $m" >&2
+      return 0
+    fi
+    echo "  ?? 镜像不可用：$m" >&2
+  done
+  # 探测失败不写缓存：这可能是第一个包那个特定资产的偶发失败，
+  # 后面包的 URL 也许能探通；且失败时调用方保持现状，本来也不需要缓存。
+  echo "  ?? 无可用镜像（可能是网络抖动）" >&2
 }
 
 # 把 PKGBUILD 的 source 改写成"PKGBUILD 内变量 + 可覆盖"形式（幂等）：
@@ -99,7 +127,7 @@ pick_mirror() {
 #   source=("x::${_gh_mirror}https://github.com/...")
 #
 # 用变量而非写死前缀：AUR 用户可 `makepkg GH_MIRROR=https://另一镜像/` 自行换源，
-# 镜像再挂也不必等维护端重推。honk-bin 那类已有 GITHUB_MIRROR 机制的包只更新默认值。
+# 镜像再挂也不必等维护端重推。已有 GITHUB_MIRROR 机制的包只更新默认值。
 #
 # 覆盖的现状写法：写死前缀 / 直连 / flclash 的 ${url} 相对写法。
 # url= 等非 source 字段不动。返回 0 = 有改动，1 = 无改动。
@@ -114,7 +142,7 @@ path, mirror = sys.argv[1], sys.argv[2]
 default = mirror.rstrip('/') + '/'
 src = open(path, encoding='utf-8').read()
 
-# honk-bin 式：已有 GITHUB_MIRROR 机制，只更新默认值（不带结尾斜杠）
+# 已有 GITHUB_MIRROR 机制式：只更新默认值（不带结尾斜杠）
 if re.search(r'^_github_mirror="\$\{GITHUB_MIRROR:-', src, re.M):
     src = re.sub(r'^_github_mirror="\$\{GITHUB_MIRROR:-[^}]*\}"',
                  f'_github_mirror="${{GITHUB_MIRROR:-{mirror.rstrip("/")}}}"',

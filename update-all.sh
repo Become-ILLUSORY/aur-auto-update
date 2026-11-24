@@ -58,9 +58,9 @@ init_pkg_repo() {
 
 # 下载加速：把 PKGBUILD source 里的 GitHub release URL 挂到可用镜像前缀下（幂等）。
 # 无别名也行——srcdir 文件名=URL 末段，与 package() 引用一致。
-# 镜像失效（如 gh-proxy.com 403）时会自动迁移到可用镜像并 bump pkgrel。
+# 镜像失效时自动迁移到可用镜像；迁移只改下载路径，不 bump pkgrel。
 ensure_mirror() {
-  local prefix gh_url rel
+  local prefix gh_url
   # 探测目标必须取 .SRCINFO 里 source 的真实下载 URL（剥掉旧前缀）。
   # 不能用仓库首页充当目标：镜像对首页回 200、对下载却 403，会误判。
   gh_url="$(grep -oE 'https://github\.com/[^"'"'"' )]+' .SRCINFO 2>/dev/null \
@@ -70,10 +70,12 @@ ensure_mirror() {
     return 0
   fi
 
-  prefix="$(pick_mirror "$gh_url")"
+  # pick_mirror 的缓存靠主 shell 里的变量，不能放进命令替换（子 shell）。
+  pick_mirror "$gh_url"
+  prefix="$_MIRROR_SELECTED"
 
   # 全部探测失败：可能是网络抖动而非镜像真挂，保持现状不改 PKGBUILD。
-  # 否则每次抖动都会把 source 退回直连、bump pkgrel，下次又加回镜像，来回横跳。
+  # 否则每次抖动都会把 source 退回直连，下次又加回镜像，来回横跳。
   if [[ -z "$prefix" ]]; then
     local cur
     cur="$(current_mirror)"
@@ -83,9 +85,11 @@ ensure_mirror() {
 
   ensure_mirror_var "$prefix" || { echo "  -> 镜像默认值已是最新"; return 0; }
 
-  rel="$(bump_pkgrel)"
+  # 不 bump pkgrel：这只改了 source 的下载路径，产物字节与 sha256 都没变，
+  # 升 rel 会让订阅者每天为一个"假更新"重装一次。pkgrel 只在内容真的变了
+  # （新版本、上游重发）时才升——见 run() 与 detect_upstream_republish。
   gen_srcinfo
-  echo "  -- 镜像默认值改为 $prefix，pkgrel -> $rel"
+  echo "  -- 镜像默认值改为 $prefix（内容未变，不 bump pkgrel）"
 }
 
 # ---- 单个包的一次性处理 ----
@@ -163,13 +167,18 @@ run_one() {
     action="无更新"
     note="上游无新版本，AUR 已是最新"
   elif [[ "${AUR_PUSH:-1}" == "1" ]]; then
-    local before after
+    local before after push_rc=0
     before="$(git -C "$wd" rev-parse HEAD)"
     pushd "$wd" >/dev/null
-      aur_push_if_changed "chore(${pkg}): auto-update"
+      aur_push_if_changed "chore(${pkg}): auto-update" || push_rc=$?
     popd >/dev/null
     after="$(git -C "$wd" rev-parse HEAD)"
-    if [[ "$before" != "$after" ]]; then
+    if (( push_rc != 0 )); then
+      # 单个包 push 被拒（如 AUR 上该包 orphaned）不能中断整轮：后面的包
+      # 无辜受累，本轮的更新也全部丢失。记为失败，继续下一个。
+      action="失败"
+      note="push 到 AUR 失败（rc=$push_rc，见上方日志）"
+    elif [[ "$before" != "$after" ]]; then
       action="更新推送"
       note="$(git -C "$wd" show --stat --format='%s' "${after:0:7}" | tail -n +2 | tr '\n' ' ' | awk '{$1=$1};1')"
     else
