@@ -48,19 +48,24 @@ ver_cmp() {
 
 # ---------- GitHub 下载镜像（加速前缀） ----------
 #
-# gh-proxy.com 已对下载路径返回 403（"Access to proxy rules is forbidden on
-# this hostname"），但它仍代理 github.com 首页/仓库页（200），所以探测必须
-# 打真实下载 URL，否则会误判为"可用"。jsDelivr 只镜像 git 树（@tag/path）、
-# 不代理 release 资产，也无法替代。
+# 探测必须打真实下载 URL：镜像对 github.com 首页/仓库页常回 200/302 落地页，
+# 只有拿到真实字节才算可用（jsDelivr 只镜像 git 树，不代理 release 资产）。
 #
-# 只保留一个镜像：多镜像按顺序探测时，runner 网络抖动会让首选偶发失败、
-# 回落到次选，写入 PKGBUILD 后下次又切回来——每个包每天来回横跳并 bump
-# pkgrel，制造大量"无内容变化"的提交。单一镜像 + 探测重试杜绝横跳。
+# 横跳（首选偶发失败→回落次选→下次又切回，每个包每天为无内容变化 bump
+# pkgrel）已由 pick_mirror 的"优先保持当前已用镜像"解决，因此可以有备份。
+# 顺序即优先级：首选不可用才降到下一个。
+#
+# 2026-11-26 实测（绕开本地 fake-ip，按真实 IP 直连，4 类 URL × 3 轮）：
+#   gh-proxy.cn  稳定 503            → 移除
+#   ghproxy.net  真实 IP 不可达       → 移除（可能只对境外开放）
+#   gh-proxy.com 206 为主，约 1/4 偶发超时，重试可救 → 保留为首选
+# 曾经的 403（"Access to proxy rules is forbidden"）已恢复，探测取真实字节
+# 可区分"真代理下载"与"只回落地页"。
 #
 # 探测只在维护端（update-all.sh / CI）发生：PKGBUILD 是静态文件，AUR 用户
 # makepkg 时不会探测，最终仍指向选定镜像；用户可 makepkg GH_MIRROR=... 覆盖。
 GH_MIRRORS=(
-  "https://gh-proxy.cn"
+  "https://gh-proxy.com"
 )
 
 # 探测某镜像能否代理给定 GitHub URL（取前 1KB）。
@@ -68,12 +73,20 @@ GH_MIRRORS=(
 # （206 或 200 且真有内容）才算可用。
 # CI runner 的出口网络偶发超时，单次失败不可信：重试 3 次，任一成功即算可用。
 probe_mirror() {
-  local prefix="$1" gh_url="$2" code size i
+  local prefix="$1" gh_url="$2" code size i out
   for i in 1 2 3; do
-    read -r code size < <(curl -sL -o /dev/null -r 0-1023 -m 25 \
-                             -w '%{http_code} %{size_download}' \
-                             "$prefix/$gh_url" 2>/dev/null || echo "000 0")
-    [[ "$code" == 206 || "$code" == 200 ]] && [[ "${size:-0}" -gt 0 ]] && return 0
+    # curl 正常退出时 -w 输出不带换行；失败时 `|| echo` 再追加一行，
+    # read 会把两行拼进同一个变量（size 变成 "000 0"），[[ -gt ]] 直接
+    # 算术报错 "arithmetic syntax error"。取首个空白分隔的两个字段即可，
+    # 且只接受纯数字，避免把 "000 0" 之类喂给算术表达式。
+    out="$(curl -sL -o /dev/null -r 0-1023 -m 25 \
+             -w '%{http_code} %{size_download}\n' \
+             "$prefix/$gh_url" 2>/dev/null || true)"
+    read -r code size <<< "$(printf '%s' "$out" | awk 'NF{print $1, $2; exit}')"
+    code="${code:-000}" size="${size:-0}"
+    [[ "$code" =~ ^[0-9]+$ ]] || code=000
+    [[ "$size" =~ ^[0-9]+$ ]] || size=0
+    [[ "$code" == 206 || "$code" == 200 ]] && (( size > 0 )) && return 0
     (( i < 3 )) && sleep 2
   done
   return 1

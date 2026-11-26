@@ -2,7 +2,7 @@
 # 自用维护：Mister Download Manager（GPL-3.0 开源下载管理器），上游 anefzaoui/misterdownloadmanager。
 #   上游 Linux release 的 tar.gz 只含可执行文件/浏览器扩展/许可证，**不含** .desktop 与图标，
 #   这两项由本 PKGBUILD 提供；图标取自上游 art/，固定 commit 避免随 main 漂移。
-#   source 走 gh-proxy.cn 加速（大陆直连 GitHub 慢，镜像由 lib/common.sh 优选）。
+#   source 走 gh-proxy.com 加速（大陆直连 GitHub 慢，镜像由 lib/common.sh 优选）。
 pkgname=misterdownloadmanager-private-bin
 _pkgname=misterdownloadmanager
 _upstream=anefzaoui/misterdownloadmanager
@@ -14,7 +14,7 @@ pkgdesc='自用维护：多线程/断点续传/浏览器接管/BT 下载管理�
 arch=('x86_64')
 url="https://github.com/${_upstream}"
 # GitHub 下载加速镜像；换镜像可 makepkg GH_MIRROR=https://另一镜像/
-_gh_mirror="${GH_MIRROR:-https://gh-proxy.cn/}"
+_gh_mirror="${GH_MIRROR:-https://gh-proxy.com/}"
 _gh_mirror="${_gh_mirror%/}/"
 license=('GPL-3.0-only')
 depends=('glibc' 'gcc-libs' 'gtk3' 'libglvnd' 'libx11' 'libxcursor' 'libxi'

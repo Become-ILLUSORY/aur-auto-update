@@ -37,7 +37,8 @@ craft 系列（14 个）：`wordcraft` `deckcraft` `photocraft` `vectorcraft` `f
 
 注意三件事：
 
-- **只保留单一镜像**：多个镜像按顺序探测时，runner 网络抖动会让首选偶发失败、回落到次选，下次又切回来，每个包每天为一个没有任何内容变化的"更新"bump `pkgrel`。现在 `GH_MIRRORS` 只留 `gh-proxy.cn`；`pick_mirror` 也先探当前已用的镜像，可用就不换。
+- **镜像会下线，需定期复测**：`gh-proxy.com` 于 2026-11 一度对下载路径回 403 被封，改用 `gh-proxy.cn`；2026-11-26 复测发现 `gh-proxy.cn` 稳定 503，`gh-proxy.com` 已恢复（真实 IP 直连 4 类 URL × 3 轮，返回真实文件字节而非错误页），遂换回。`ghproxy.net` 真实 IP 不可达，未采用。**换镜像前必须绕开本地 DNS 劫持、按真实 IP 直连验证返回的是真实字节**，否则会把落地页误判为可用。
+- **横跳已由 `pick_mirror` 兜住**：它先探当前已用的镜像，可用就不换；只有当前镜像不在 `GH_MIRRORS` 白名单或真不可用才迁移。所以 `GH_MIRRORS` 可以有备份项，顺序即优先级。
 - **jsDelivr 不能替代**：它只镜像 git 仓库内容（`@tag/path`），不代理 Release 资产，而这些包的 `source` 全是 release 资产。
 - PKGBUILD 是静态文件，AUR 用户 `makepkg` 时不会探测，最终仍写死为选定的单一镜像。用户可 `makepkg GH_MIRROR=https://另一镜像/` 覆盖。**镜像迁移只改下载路径，不 bump `pkgrel`**——产物字节和 sha256 没变，升 rel 只会让订阅者重装一个内容相同的包。
 
