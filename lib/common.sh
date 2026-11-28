@@ -55,17 +55,17 @@ ver_cmp() {
 # pkgrel）已由 pick_mirror 的"优先保持当前已用镜像"解决，因此可以有备份。
 # 顺序即优先级：首选不可用才降到下一个。
 #
-# 2026-11-26 实测（绕开本地 fake-ip，按真实 IP 直连，4 类 URL × 3 轮）：
-#   gh-proxy.cn  稳定 503            → 移除
-#   ghproxy.net  真实 IP 不可达       → 移除（可能只对境外开放）
-#   gh-proxy.com 206 为主，约 1/4 偶发超时，重试可救 → 保留为首选
+# 2026-11-28 实测：
+#   cdn.gh-proxy.org 16/16 返回真实文件字节（CNAME → www.gh-proxy.com，同源）
+#   gh-proxy.com 同等可用（与上面同一后端，故不再单列）      → 换用 cdn.gh-proxy.org
+# 历史：gh-proxy.cn 稳定 503 → 移除；ghproxy.net 真实 IP 不可达 → 移除。
 # 曾经的 403（"Access to proxy rules is forbidden"）已恢复，探测取真实字节
 # 可区分"真代理下载"与"只回落地页"。
 #
 # 探测只在维护端（update-all.sh / CI）发生：PKGBUILD 是静态文件，AUR 用户
 # makepkg 时不会探测，最终仍指向选定镜像；用户可 makepkg GH_MIRROR=... 覆盖。
 GH_MIRRORS=(
-  "https://gh-proxy.com"
+  "https://cdn.gh-proxy.org"
 )
 
 # 探测某镜像能否代理给定 GitHub URL（取前 1KB）。

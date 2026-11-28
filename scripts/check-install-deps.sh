@@ -82,7 +82,7 @@ srcinfo_deps() {
 }
 
 # PKGBUILD 里的 _gh_mirror 是 URL 前缀："${_gh_mirror}${url}"，默认值是面向
-# 国内的 gh-proxy.cn。CI runner 在美国，未必通得了国内镜像。
+# 国内的 cdn.gh-proxy.org。CI runner 在美国，未必通得了国内镜像。
 #
 # 与其和前缀变量较劲（${VAR:-默认} 会把空串回落成默认，没法表示"不要前缀"），
 # 不如先把 source 直连 GitHub 下载到 SRCDEST：makepkg 发现缓存命中就不再下载，
@@ -93,7 +93,7 @@ srcinfo_deps() {
 
 strip_mirror_prefix() {
   local url="$1" m
-  for m in "https://gh-proxy.cn" "https://gh-proxy.com"; do
+  for m in "https://gh-proxy.cn" "https://gh-proxy.com" "https://cdn.gh-proxy.org"; do
     [[ "$url" == "$m/"* ]] && { printf '%s\n' "${url#"$m/"}"; return 0; }
   done
   printf '%s\n' "$url"
